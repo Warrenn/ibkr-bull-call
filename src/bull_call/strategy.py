@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -68,6 +69,106 @@ def propose_trade(
         pop_fn=pop_fn,
         pop_threshold=settings.pop_threshold,
     )
+
+
+FetchChain = Callable[[], "ChainSnapshot | None"]
+VerifyLegsBalanced = Callable[..., bool]
+FlattenUnmatchedLeg = Callable[..., None]
+
+
+def attempt_until_filled(
+    store: Store,
+    *,
+    symbol: str,
+    today_iso: str,
+    close_utc: dt.datetime,
+    deadline_utc: dt.datetime,
+    settings: Settings,
+    fetch_chain: FetchChain,
+    submit_entry: SubmitEntry,
+    verify_legs_balanced: VerifyLegsBalanced,
+    flatten_unmatched_leg: FlattenUnmatchedLeg,
+    now_fn: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.timezone.utc),
+    sleep_fn: Callable[[float], None] = time.sleep,
+    soft_retry_delay_s: float = 60.0,
+) -> OpenResult | None:
+    """Keep submitting entry orders until one fills, deadline passes, or a
+    leg-out forces us to flatten.
+
+    Each iteration re-fetches the chain (quotes have moved during the prior
+    5-min limit cycle) and re-runs the strike selector — selection may pick
+    different strikes if IV / spot have drifted.
+
+    A *soft* retry (no chain available, or no viable spread today) waits
+    ``soft_retry_delay_s`` (default 60s) so we don't hammer the gateway.
+    A *hard* retry (limit order cancelled by us after the 5-min budget)
+    proceeds immediately — the cancel cycle is itself the delay.
+
+    Stops:
+      - filled and legs balanced -> return OpenResult (only outcome that
+        creates a SQLite spread row)
+      - filled but legs not balanced within ``settings.leg_fill_timeout_sec``
+        -> flatten the orphan leg at MKT, return None, do NOT retry today
+      - now >= deadline_utc -> return None (no trade today)
+    """
+
+    while True:
+        now = now_fn()
+        if now >= deadline_utc:
+            log.info("entry deadline reached for %s; no trade today", symbol)
+            return None
+
+        chain = fetch_chain()
+        if chain is None:
+            log.info("no chain for %s; soft-retrying in %.0fs", symbol, soft_retry_delay_s)
+            sleep_fn(soft_retry_delay_s)
+            continue
+
+        spread = propose_trade(chain, settings=settings, now_utc=now, close_utc=close_utc)
+        if spread is None:
+            log.info("no viable spread for %s; soft-retrying in %.0fs",
+                     symbol, soft_retry_delay_s)
+            sleep_fn(soft_retry_delay_s)
+            continue
+
+        long_leg = chain.contracts[spread.long_strike]
+        short_leg = chain.contracts[spread.short_strike]
+        log.info(
+            "attempting %s long=%s short=%s debit=%.2f pop=%.3f",
+            symbol, spread.long_strike, spread.short_strike, spread.debit, spread.pop,
+        )
+        fill = submit_entry(
+            long_leg=long_leg,
+            short_leg=short_leg,
+            debit_mid=spread.debit,
+            debit_max=spread.debit + 0.20,
+        )
+        if not fill.filled:
+            log.info("attempt for %s did not fill within budget; immediate retry", symbol)
+            continue
+
+        if not verify_legs_balanced(long_leg=long_leg, short_leg=short_leg):
+            log.error(
+                "leg-out detected for %s after fill report; flattening any open leg",
+                symbol,
+            )
+            flatten_unmatched_leg(long_leg=long_leg, short_leg=short_leg)
+            return None  # do NOT retry; treat the symbol as done for the day
+
+        sid = store.record_open(
+            date=today_iso,
+            symbol=symbol,
+            long_strike=spread.long_strike,
+            short_strike=spread.short_strike,
+            debit=fill.avg_fill_price,
+            opened_at=now.isoformat(),
+        )
+        log.info(
+            "filled %s %s/%s @ %.2f (sid=%d)",
+            symbol, spread.long_strike, spread.short_strike,
+            fill.avg_fill_price, sid,
+        )
+        return OpenResult(spread_id=sid, fill_price=fill.avg_fill_price)
 
 
 def open_spread(

@@ -23,10 +23,18 @@ from bull_call.cpapi.chain import (
 )
 from bull_call.cpapi.chain import fetch_0dte_call_chain, fetch_spot
 from bull_call.cpapi.client import connect, disconnect, select_account_id
-from bull_call.cpapi.execution import submit_close_market, submit_entry_lmt
+from bull_call.cpapi.execution import (
+    flatten_unmatched_leg as cp_flatten_unmatched_leg,
+)
+from bull_call.cpapi.execution import (
+    submit_close_market,
+    submit_entry_lmt,
+    verify_legs_balanced as cp_verify_legs_balanced,
+)
 from bull_call.cpapi.spot import open_ws, stream_ticks, subscribe_underlying
 from bull_call.state import Store
 from bull_call.strategy import (
+    attempt_until_filled,
     monitor_stop,
     open_spread,
     propose_trade,
@@ -124,27 +132,18 @@ class Scheduler:
     ) -> None:
         assert self._client is not None and self._account_id is not None
 
-        chain = fetch_0dte_call_chain(self._client, symbol=symbol, today_et=today_et)
-        if chain is None:
-            log.warning("no chain available for %s", symbol)
-            return
-        now = dt.datetime.now(dt.timezone.utc)
-        spread = propose_trade(
-            chain, settings=self._settings, now_utc=now, close_utc=close_utc,
-        )
-        if spread is None:
-            log.info("no viable spread for %s", symbol)
-            return
-        log.info(
-            "proposed %s long=%s short=%s debit=%.2f pop=%.3f",
-            symbol, spread.long_strike, spread.short_strike, spread.debit, spread.pop,
-        )
-
         client = self._client
         account_id = self._account_id
 
         ratio = self._settings.min_profit_to_loss_ratio
         entry_timeout = float(self._settings.entry_timeout_sec)
+        leg_timeout = float(self._settings.leg_fill_timeout_sec)
+        deadline_utc = dt.datetime.combine(
+            today_et, self._settings.entry_deadline_et, _ET,
+        ).astimezone(dt.timezone.utc)
+
+        def fetch_chain():  # type: ignore[no-untyped-def]
+            return fetch_0dte_call_chain(client, symbol=symbol, today_et=today_et)
 
         def submit_entry(**kw):  # type: ignore[no-untyped-def]
             return submit_entry_lmt(
@@ -155,10 +154,30 @@ class Scheduler:
                 **kw,
             )
 
-        open_spread(
+        def verify_legs_balanced(*, long_leg, short_leg):  # type: ignore[no-untyped-def]
+            return cp_verify_legs_balanced(
+                client, account_id=account_id,
+                long_leg=long_leg, short_leg=short_leg,
+                timeout_s=leg_timeout,
+            )
+
+        def flatten_unmatched_leg(*, long_leg, short_leg):  # type: ignore[no-untyped-def]
+            cp_flatten_unmatched_leg(
+                client, account_id=account_id,
+                long_leg=long_leg, short_leg=short_leg,
+            )
+
+        attempt_until_filled(
             self._store,
-            chain=chain, spread=spread, now_utc=now, today_iso=today_iso,
+            symbol=symbol,
+            today_iso=today_iso,
+            close_utc=close_utc,
+            deadline_utc=deadline_utc,
+            settings=self._settings,
+            fetch_chain=fetch_chain,
             submit_entry=submit_entry,
+            verify_legs_balanced=verify_legs_balanced,
+            flatten_unmatched_leg=flatten_unmatched_leg,
         )
 
     def _monitor_open_spreads(

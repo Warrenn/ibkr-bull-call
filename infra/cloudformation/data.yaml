@@ -26,6 +26,8 @@ Parameters:
         "stopEnabled": true,
         "stopLatestSec": 30,
         "entryTimeoutSec": 300,
+        "entryDeadlineEt": "13:00",
+        "legFillTimeoutSec": 30,
         "logLevel": "INFO",
         "minProfitToLossRatio": null
       }

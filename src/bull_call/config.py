@@ -45,6 +45,14 @@ class Settings:
     # we cancel and walk away. Split 50/50 between the initial-price phase
     # and the one-tick reprice phase.
     entry_timeout_sec: int = 300
+    # ET clock time after which we stop trying to enter today (no fill, no
+    # viable spread, repeated cancels — give up). Default 13:00 ET leaves
+    # roughly 3 hours for a filled spread to work toward 4 pm settlement.
+    entry_deadline_et: dt.time = dt.time(13, 0)
+    # After a combo fill, max seconds we'll wait for both legs to show up
+    # in positions before treating it as a leg-out and flattening the orphan
+    # leg at MKT.
+    leg_fill_timeout_sec: int = 30
 
 
 def load_settings(env: dict[str, str] | None = None) -> Settings:
@@ -81,4 +89,8 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         log_level=src.get("LOG_LEVEL", "INFO").upper(),
         min_profit_to_loss_ratio=min_profit_to_loss_ratio,
         entry_timeout_sec=int(src.get("ENTRY_TIMEOUT_SEC", "300")),
+        entry_deadline_et=_parse_time(
+            src.get("ENTRY_DEADLINE_ET", "13:00"), "ENTRY_DEADLINE_ET",
+        ),
+        leg_fill_timeout_sec=int(src.get("LEG_FILL_TIMEOUT_SEC", "30")),
     )

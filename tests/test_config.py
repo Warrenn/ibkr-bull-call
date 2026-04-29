@@ -27,6 +27,8 @@ def test_load_with_defaults_and_required(monkeypatch: pytest.MonkeyPatch) -> Non
     assert s.log_level == "INFO"
     assert s.min_profit_to_loss_ratio is None  # default = no constraint
     assert s.entry_timeout_sec == 300           # default = 5 min total budget
+    assert s.entry_deadline_et == dt.time(13, 0)  # default = stop at 1 pm ET
+    assert s.leg_fill_timeout_sec == 30         # default = 30s leg-out grace
 
 
 def test_min_profit_to_loss_ratio_parses(monkeypatch: pytest.MonkeyPatch) -> None:

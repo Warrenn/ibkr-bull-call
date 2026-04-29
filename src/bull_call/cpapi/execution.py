@@ -223,6 +223,107 @@ def submit_close_market(
     return FillReport(filled=False, avg_fill_price=math.nan, order_id=order_id)
 
 
+def _qty_for_conid(client: IbkrClient, *, account_id: str, conid: int) -> int:
+    """Return the signed position quantity for ``conid`` on ``account_id``.
+
+    0 if there's no open position. ibind exposes ``positions_by_conid`` which
+    returns a list (one entry for the asked conid, or empty).
+    """
+
+    try:
+        resp = client.positions_by_conid(account_id=account_id, conid=str(conid))
+    except Exception as exc:
+        log.warning("positions_by_conid(%d) failed: %s", conid, exc)
+        return 0
+    rows = resp.data or []
+    total = 0
+    for row in rows:
+        # IBKR returns float, but option positions are always whole contracts.
+        total += int(round(float(row.get("position", 0))))
+    return total
+
+
+def verify_legs_balanced(
+    client: IbkrClient,
+    *,
+    account_id: str,
+    long_leg: OptionContract,
+    short_leg: OptionContract,
+    timeout_s: float = 30.0,
+    poll_interval_s: float = 2.0,
+) -> bool:
+    """Poll until both legs of the spread match (long: +1, short: -1).
+
+    Returns True if balanced within the timeout, else False (caller should
+    flatten the unmatched leg).
+    """
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        long_qty = _qty_for_conid(client, account_id=account_id, conid=long_leg.conid)
+        short_qty = _qty_for_conid(client, account_id=account_id, conid=short_leg.conid)
+        if long_qty == 1 and short_qty == -1:
+            return True
+        time.sleep(poll_interval_s)
+    return False
+
+
+def flatten_unmatched_leg(
+    client: IbkrClient,
+    *,
+    account_id: str,
+    long_leg: OptionContract,
+    short_leg: OptionContract,
+) -> None:
+    """Close any single-leg position left dangling after a leg-out at MKT.
+
+    No-op if both legs are balanced or both are flat.  If only one leg has
+    a non-zero position, submit a MARKET order on that single leg to close.
+    """
+
+    long_qty = _qty_for_conid(client, account_id=account_id, conid=long_leg.conid)
+    short_qty = _qty_for_conid(client, account_id=account_id, conid=short_leg.conid)
+
+    if long_qty != 0 and short_qty == 0:
+        log.error(
+            "leg-out: long conid=%d qty=%d filled but short conid=%d not filled; "
+            "submitting MKT close for the long leg",
+            long_leg.conid, long_qty, short_leg.conid,
+        )
+        order = OrderRequest(
+            conid=str(long_leg.conid),
+            side="SELL" if long_qty > 0 else "BUY",
+            quantity=abs(long_qty),
+            order_type="MKT",
+            tif="DAY",
+            acct_id=account_id,
+        )
+        client.place_order(order_request=order, answers=_DEFAULT_ANSWERS, account_id=account_id)
+        return
+
+    if short_qty != 0 and long_qty == 0:
+        log.error(
+            "leg-out: short conid=%d qty=%d filled but long conid=%d not filled; "
+            "submitting MKT close for the short leg",
+            short_leg.conid, short_qty, long_leg.conid,
+        )
+        order = OrderRequest(
+            conid=str(short_leg.conid),
+            side="BUY" if short_qty < 0 else "SELL",
+            quantity=abs(short_qty),
+            order_type="MKT",
+            tif="DAY",
+            acct_id=account_id,
+        )
+        client.place_order(order_request=order, answers=_DEFAULT_ANSWERS, account_id=account_id)
+        return
+
+    log.info(
+        "no leg-out detected (long_qty=%d short_qty=%d); nothing to flatten",
+        long_qty, short_qty,
+    )
+
+
 def _extract_order_id(data: Any) -> str | None:
     if not data:
         return None

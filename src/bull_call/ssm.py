@@ -41,6 +41,8 @@ _SETTINGS_KEY_MAP: dict[str, str] = {
     "stateDir": "STATE_DIR",
     "minProfitToLossRatio": "MIN_PROFIT_TO_LOSS_RATIO",
     "entryTimeoutSec": "ENTRY_TIMEOUT_SEC",
+    "entryDeadlineEt": "ENTRY_DEADLINE_ET",
+    "legFillTimeoutSec": "LEG_FILL_TIMEOUT_SEC",
 }
 
 
