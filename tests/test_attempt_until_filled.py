@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import datetime as dt
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -19,6 +18,9 @@ from bull_call.execution import FillReport
 from bull_call.state import Store
 from bull_call.strategy import attempt_until_filled
 from bull_call.strikes import OptionQuote
+
+
+# `store` fixture provided by tests/conftest.py (moto-backed DynamoDB).
 
 
 CLOSE_UTC = dt.datetime(2026, 4, 29, 20, 0, tzinfo=dt.timezone.utc)
@@ -35,7 +37,7 @@ def _settings(**overrides: Any) -> Settings:
         entry_time_et=dt.time(10, 30),
         stop_enabled=True,
         stop_latest_sec=30,
-        state_dir="-",
+        state_table="bull-call-test",
         log_level="INFO",
     )
     base.update(overrides)
@@ -57,11 +59,6 @@ def _chain() -> ChainSnapshot:
         spot=5000.0, atm_iv=0.18,
         quotes=quotes, contracts=contracts,
     )
-
-
-@pytest.fixture
-def store(tmp_path: Path) -> Store:
-    return Store(tmp_path / "state.db")
 
 
 def _clock(start: dt.datetime, advance: dt.timedelta) -> Callable[[], dt.datetime]:
@@ -114,7 +111,7 @@ def test_first_attempt_fills_and_balances(store: Store) -> None:
     )
 
     assert result is not None
-    assert result.spread_id > 0
+    assert result.spread_id == "2026-04-29#SPX"
     assert len(submit_calls) == 1
     assert len(verify_calls) == 1
     assert store.has_trade_today("2026-04-29") is True

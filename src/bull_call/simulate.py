@@ -24,14 +24,62 @@ import csv
 import datetime as dt
 import logging
 import sys
-import tempfile
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 
 from bull_call.config import Settings
 from bull_call.execution import FillReport
-from bull_call.state import Store
+from bull_call.state import SpreadRecord, StopEvent
 from bull_call.strategy import StopOutcome, monitor_stop
+
+
+class _InMemoryStore:
+    """A minimal in-process Store-compatible object for the simulator.
+
+    Avoids spinning up DynamoDB (or moto) just to demonstrate state-machine
+    behaviour from a script.
+    """
+
+    def __init__(self) -> None:
+        self._spreads: dict[str, SpreadRecord] = {}
+        self._events: dict[str, list[StopEvent]] = {}
+
+    def record_open(
+        self, *, date: str, symbol: str, long_strike: float, short_strike: float,
+        debit: float, opened_at: str, **_kw: object,
+    ) -> str:
+        sid = f"{date}#{symbol}"
+        self._spreads[sid] = SpreadRecord(
+            id=sid, date=date, symbol=symbol,
+            long_strike=long_strike, short_strike=short_strike, debit=debit,
+            status="OPEN", opened_at=opened_at,
+            closed_at=None, exit_kind=None, settle_value=None, pnl=None,
+        )
+        return sid
+
+    def record_stop_event(
+        self, *, spread_id: str, ts: str, event: str, spot: float, breakeven: float,
+    ) -> None:
+        self._events.setdefault(spread_id, []).append(
+            StopEvent(spread_id=spread_id, ts=ts, event=event,
+                      spot=spot, breakeven=breakeven),
+        )
+
+    def stop_events(self, spread_id: str) -> list[StopEvent]:
+        return list(self._events.get(spread_id, []))
+
+    def get_spread(self, spread_id: str) -> SpreadRecord:
+        return self._spreads[spread_id]
+
+    def record_close(
+        self, *, spread_id: str, closed_at: str, exit_kind: str, pnl: float,
+    ) -> None:
+        rec = self._spreads[spread_id]
+        status = "STOPPED" if exit_kind == "STOP" else "SETTLED"
+        self._spreads[spread_id] = replace(
+            rec, status=status, closed_at=closed_at, exit_kind=exit_kind, pnl=pnl,
+        )
 
 log = logging.getLogger(__name__)
 
@@ -46,7 +94,7 @@ def _settings(stop_latest_sec: int) -> Settings:
         entry_time_et=dt.time(10, 30),
         stop_enabled=True,
         stop_latest_sec=stop_latest_sec,
-        state_dir="-",
+        state_table="bull-call-test",
         log_level="INFO",
     )
 
@@ -147,63 +195,62 @@ def run(
           f"(suppress window = last {stop_latest_sec}s)")
     print()
 
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=True) as tf:
-        store = Store(Path(tf.name))
-        sid = store.record_open(
-            date=ticks[0][1].date().isoformat(),
-            symbol="SPX",
-            long_strike=long_strike,
-            short_strike=short_strike,
-            debit=debit,
-            opened_at=ticks[0][1].isoformat(),
-        )
+    store = _InMemoryStore()
+    sid = store.record_open(
+        date=ticks[0][1].date().isoformat(),
+        symbol="SPX",
+        long_strike=long_strike,
+        short_strike=short_strike,
+        debit=debit,
+        opened_at=ticks[0][1].isoformat(),
+    )
 
-        observed: list[tuple[dt.datetime, float]] = []
+    observed: list[tuple[dt.datetime, float]] = []
 
-        def tick_stream() -> Iterator[tuple[float, dt.datetime]]:
-            for spot, t in ticks:
-                observed.append((t, spot))
-                yield spot, t
+    def tick_stream() -> Iterator[tuple[float, dt.datetime]]:
+        for spot, t in ticks:
+            observed.append((t, spot))
+            yield spot, t
 
-        def submit_close(**_: object) -> FillReport:
-            return FillReport(filled=True, avg_fill_price=exit_credit)
+    def submit_close(**_: object) -> FillReport:
+        return FillReport(filled=True, avg_fill_price=exit_credit)
 
-        def estimate_credit() -> float:
-            return 0.0 if estimate_zero_credit else exit_credit
+    def estimate_credit() -> float:
+        return 0.0 if estimate_zero_credit else exit_credit
 
-        outcome = monitor_stop(
-            store,
-            spread_id=sid,
-            breakeven=breakeven,
-            settings=settings,
-            close_utc=close_utc,
-            tick_stream=tick_stream(),
-            submit_close=submit_close,
-            estimate_close_credit=estimate_credit,
-        )
+    outcome = monitor_stop(
+        store,
+        spread_id=sid,
+        breakeven=breakeven,
+        settings=settings,
+        close_utc=close_utc,
+        tick_stream=tick_stream(),
+        submit_close=submit_close,
+        estimate_close_credit=estimate_credit,
+    )
 
-        print("  ticks consumed:")
-        for ts, spot in observed:
-            rel = "above" if spot >= breakeven else "below"
-            print(f"    {ts.isoformat()}  spot={spot:>9.2f}  ({rel} breakeven)")
-        print()
+    print("  ticks consumed:")
+    for ts, spot in observed:
+        rel = "above" if spot >= breakeven else "below"
+        print(f"    {ts.isoformat()}  spot={spot:>9.2f}  ({rel} breakeven)")
+    print()
 
-        events = store.stop_events(sid)
-        print(f"  stop journal: {len(events)} event(s)")
-        for evt in events:
-            print(f"    {evt.ts}  {evt.event:<12}  spot={evt.spot:.2f}")
-        print()
+    events = store.stop_events(sid)
+    print(f"  stop journal: {len(events)} event(s)")
+    for evt in events:
+        print(f"    {evt.ts}  {evt.event:<12}  spot={evt.spot:.2f}")
+    print()
 
-        rec = store.get_spread(sid)
-        print(f"  outcome           = {outcome.name}")
-        print(f"  spread.status     = {rec.status}")
-        print(f"  spread.exit_kind  = {rec.exit_kind}")
-        if rec.pnl is not None:
-            print(f"  realized P&L      = ${rec.pnl:+.2f}")
-        else:
-            print(f"  realized P&L      = (would be settled at 4pm)")
-        max_held_loss = -debit * 100.0
-        print(f"  max-loss-if-held  = ${max_held_loss:+.2f}  (a fully OTM expiry)")
+    rec = store.get_spread(sid)
+    print(f"  outcome           = {outcome.name}")
+    print(f"  spread.status     = {rec.status}")
+    print(f"  spread.exit_kind  = {rec.exit_kind}")
+    if rec.pnl is not None:
+        print(f"  realized P&L      = ${rec.pnl:+.2f}")
+    else:
+        print(f"  realized P&L      = (would be settled at 4pm)")
+    max_held_loss = -debit * 100.0
+    print(f"  max-loss-if-held  = ${max_held_loss:+.2f}  (a fully OTM expiry)")
 
     return 0
 

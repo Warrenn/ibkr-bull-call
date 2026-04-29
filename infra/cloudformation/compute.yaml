@@ -4,8 +4,9 @@ Description: |
   running IBeam (Client Portal Gateway with Selenium login) + the Python bot
   natively as a systemd service.
 
-  State persists on EFS so instance replacement (kernel panic, OOM, hardware
-  failure, AZ blip) doesn't lose the day's open spread or stop journal.
+  State persists in DynamoDB (the data stack's StateTable) so instance
+  replacement (kernel panic, OOM, hardware failure, AZ blip) doesn't lose
+  the day's open spread or stop journal.
 
   Credentials NEVER live as environment variables, files, or systemd
   Environment= directives. IBeam invokes our custom SSM secrets provider at
@@ -84,6 +85,19 @@ Resources:
               - Effect: Allow
                 Action: s3:ListBucket
                 Resource: !Sub arn:aws:s3:::bull-call-${Env}-artifacts-${AWS::AccountId}
+        - PolicyName: state-table-rw
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:DescribeTable
+                Resource:
+                  Fn::ImportValue: !Sub bull-call-${Env}-state-table-arn
 
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -128,18 +142,13 @@ Resources:
               #!/bin/bash
               set -euxo pipefail
               dnf update -y
-              dnf install -y git docker python3.12 python3.12-pip amazon-cloudwatch-agent amazon-efs-utils nfs-utils
+              dnf install -y git docker python3.12 python3.12-pip amazon-cloudwatch-agent
               systemctl enable --now docker
 
-              # Mount EFS at /var/lib/bull-call so state survives instance replacement.
-              install -d -m 0755 /var/lib/bull-call
-              echo "${EfsFileSystemId}:/ /var/lib/bull-call efs _netdev,tls,iam 0 0" >> /etc/fstab
-              # Retry mount a few times in case the mount target isn't fully ready yet.
-              for i in 1 2 3 4 5; do
-                  if mount /var/lib/bull-call; then break; fi
-                  sleep 10
-              done
-              install -d -m 0755 /var/lib/bull-call/state /var/log/bull-call
+              # Local-only directories: log files (CW agent ships them out)
+              # and the systemd hardening's ReadWritePaths target. State
+              # itself lives in DynamoDB, not on disk.
+              install -d -m 0755 /var/log/bull-call /var/lib/bull-call
 
               # CloudWatch Agent: ship logs to CW.
               mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
@@ -216,16 +225,16 @@ Resources:
               cat > /etc/bull-call/bot.env <<EOF
               SSM_PREFIX=/${Env}/ibkr-bull-call
               AWS_REGION=${AWS::Region}
-              STATE_DIR=/var/lib/bull-call/state
+              STATE_TABLE=${StateTable}
               EOF
 
               systemctl daemon-reload
               systemctl enable --now ibeam.service
               systemctl enable --now bull-call-bot.service
-            - EfsFileSystemId:
-                Fn::ImportValue: !Sub bull-call-${Env}-efs-id
-              ArtifactsBucket:
+            - ArtifactsBucket:
                 Fn::ImportValue: !Sub bull-call-${Env}-artifacts-bucket
+              StateTable:
+                Fn::ImportValue: !Sub bull-call-${Env}-state-table
 
   AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup

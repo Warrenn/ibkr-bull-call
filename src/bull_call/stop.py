@@ -61,13 +61,22 @@ def advance(
 
 
 def state_from_journal_events(
-    *, breakeven: float, events: Iterable[str]
+    *,
+    breakeven: float,
+    events: Iterable[str],
+    armed_from_recovery: bool = False,
 ) -> StopState:
     """Rebuild stop state from the persisted journal on process restart.
 
     Any journal entry implies the stop was armed at some point during the
     session — so we resume armed.
+
+    ``armed_from_recovery`` forces ``armed=True`` even with an empty journal:
+    used when we adopted the position from IBKR (no journal exists for it,
+    but a real position is on the books, so the conservative posture is to
+    treat the stop as armed and let the next sub-breakeven tick fire it —
+    the uneconomic check still prevents firing on already-worthless spreads).
     """
 
-    armed = any(events)  # truthy iff at least one event recorded
+    armed = any(events) or armed_from_recovery
     return StopState(breakeven=breakeven, armed=armed)

@@ -38,7 +38,7 @@ _SETTINGS_KEY_MAP: dict[str, str] = {
     "ibHost": "IB_HOST",
     "ibPort": "IB_PORT",
     "ibClientId": "IB_CLIENT_ID",
-    "stateDir": "STATE_DIR",
+    "stateTable": "STATE_TABLE",
     "minProfitToLossRatio": "MIN_PROFIT_TO_LOSS_RATIO",
     "entryTimeoutSec": "ENTRY_TIMEOUT_SEC",
     "entryDeadlineEt": "ENTRY_DEADLINE_ET",

@@ -36,7 +36,7 @@ class Settings:
     entry_time_et: dt.time
     stop_enabled: bool
     stop_latest_sec: int
-    state_dir: str
+    state_table: str
     log_level: str
     # Minimum (max_profit / max_loss) ratio. e.g. 0.10 means "for every $1000
     # of possible loss I require at least $100 of possible profit".
@@ -85,7 +85,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         entry_time_et=_parse_time(src.get("ENTRY_TIME_ET", "10:30"), "ENTRY_TIME_ET"),
         stop_enabled=_parse_bool(src.get("STOP_ENABLED", "true")),
         stop_latest_sec=int(src.get("STOP_LATEST_SEC", "30")),
-        state_dir=src.get("STATE_DIR", "./state"),
+        state_table=src.get("STATE_TABLE", "bull-call-dev-state"),
         log_level=src.get("LOG_LEVEL", "INFO").upper(),
         min_profit_to_loss_ratio=min_profit_to_loss_ratio,
         entry_timeout_sec=int(src.get("ENTRY_TIMEOUT_SEC", "300")),

@@ -38,6 +38,35 @@ Parameters:
 
 Resources:
 
+  # DynamoDB single-table store for spread records + stop journal.
+  # Pay-per-request billing: ~150 writes/month + ~200 reads/month, well within
+  # the always-free tier (25 GB / 25 RCU / 25 WCU). Storage of the table
+  # itself is also <1 GB long-term, so realistic monthly cost is $0.
+  StateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub bull-call-${Env}-state
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Project
+          Value: ibkr-bull-call
+        - Key: Env
+          Value: !Ref Env
+
   # S3 bucket holding release artifacts (tarballs of the bot at a tagged
   # version). Bucket name is `bull-call-{env}-artifacts-{account}` so it's
   # globally unique without collisions across accounts.
@@ -124,3 +153,13 @@ Outputs:
     Value: !Ref ArtifactsBucket
     Export:
       Name: !Sub bull-call-${Env}-artifacts-bucket
+  StateTableName:
+    Description: DynamoDB table name for spreads + stop journal
+    Value: !Ref StateTable
+    Export:
+      Name: !Sub bull-call-${Env}-state-table
+  StateTableArn:
+    Description: DynamoDB table ARN
+    Value: !GetAtt StateTable.Arn
+    Export:
+      Name: !Sub bull-call-${Env}-state-table-arn

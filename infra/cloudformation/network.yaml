@@ -56,8 +56,8 @@ Resources:
       VpcId: !Ref Vpc
       CidrBlock: !Ref SubnetCidr
       AvailabilityZone: !Select [0, !GetAZs '']
-      # Auto-assign public IPs so instances can reach AWS APIs (SSM, CW, EFS,
-      # GitHub) without a NAT gateway (~$32/mo) or VPC endpoints.
+      # Auto-assign public IPs so instances can reach AWS APIs (SSM, CW, S3,
+      # DynamoDB) without a NAT gateway (~$32/mo) or VPC endpoints.
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
@@ -88,12 +88,10 @@ Resources:
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      # No ingress rules: nothing on the public internet can initiate a
-      # connection to the instance. AWS SGs are stateful, so reply traffic to
-      # connections the instance initiates is automatically allowed back
-      # without any ingress rule. The only ingress that exists at all is the
-      # self-referential NFS rule below (EFS mount target), which can only be
-      # used by other instances/ENIs attached to this same SG.
+      # No ingress rules at all: nothing on the public internet (or even
+      # within the VPC) can initiate a connection to the instance. AWS SGs
+      # are stateful, so reply traffic to connections the instance initiates
+      # is automatically allowed back without any ingress rule.
       GroupDescription: bull-call EC2 SG - zero external ingress, narrow egress
       VpcId: !Ref Vpc
       SecurityGroupEgress:
@@ -111,37 +109,6 @@ Resources:
         - Key: Name
           Value: !Sub bull-call-${Env}-sg
 
-  # Allow the EC2 SG to NFS-mount EFS (within VPC only).
-  EfsIngressFromEc2:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      GroupId: !Ref SecurityGroup
-      IpProtocol: tcp
-      FromPort: 2049
-      ToPort: 2049
-      SourceSecurityGroupId: !Ref SecurityGroup
-      Description: NFS (EFS) within the EC2 SG
-
-  EfsFileSystem:
-    Type: AWS::EFS::FileSystem
-    Properties:
-      Encrypted: true
-      PerformanceMode: generalPurpose
-      ThroughputMode: bursting
-      LifecyclePolicies:
-        - TransitionToIA: AFTER_30_DAYS
-      FileSystemTags:
-        - Key: Name
-          Value: !Sub bull-call-${Env}-state
-
-  EfsMountTarget:
-    Type: AWS::EFS::MountTarget
-    Properties:
-      FileSystemId: !Ref EfsFileSystem
-      SubnetId: !Ref PublicSubnet
-      SecurityGroups:
-        - !Ref SecurityGroup
-
 Outputs:
   VpcId:
     Value: !Ref Vpc
@@ -155,7 +122,3 @@ Outputs:
     Value: !Ref SecurityGroup
     Export:
       Name: !Sub bull-call-${Env}-sg-id
-  EfsFileSystemId:
-    Value: !Ref EfsFileSystem
-    Export:
-      Name: !Sub bull-call-${Env}-efs-id

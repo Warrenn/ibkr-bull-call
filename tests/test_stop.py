@@ -142,3 +142,15 @@ def test_state_from_journal_empty_starts_disarmed() -> None:
 
     state = state_from_journal_events(breakeven=5000.0, events=[])
     assert state.armed is False
+
+
+def test_state_from_journal_armed_from_recovery_overrides_empty_journal() -> None:
+    """When we adopt a position from IBKR (no journal exists), force
+    ``armed=True`` so the next sub-breakeven tick fires the stop."""
+
+    from bull_call.stop import state_from_journal_events
+
+    state = state_from_journal_events(
+        breakeven=5000.0, events=[], armed_from_recovery=True,
+    )
+    assert state.armed is True

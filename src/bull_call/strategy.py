@@ -13,6 +13,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
 
+from bull_call import events
 from bull_call.chain import ChainSnapshot
 from bull_call.config import Settings
 from bull_call.execution import FillReport
@@ -163,8 +164,18 @@ def attempt_until_filled(
             debit=fill.avg_fill_price,
             opened_at=now.isoformat(),
         )
+        events.emit(
+            "spread_opened",
+            spread_id=sid,
+            symbol=symbol,
+            long_strike=spread.long_strike,
+            short_strike=spread.short_strike,
+            debit=fill.avg_fill_price,
+            breakeven=spread.long_strike + fill.avg_fill_price,
+            pop=spread.pop,
+        )
         log.info(
-            "filled %s %s/%s @ %.2f (sid=%d)",
+            "filled %s %s/%s @ %.2f (sid=%s)",
             symbol, spread.long_strike, spread.short_strike,
             fill.avg_fill_price, sid,
         )
@@ -214,13 +225,14 @@ def open_spread(
 def monitor_stop(
     store: Store,
     *,
-    spread_id: int,
+    spread_id: str,
     breakeven: float,
     settings: Settings,
     close_utc: dt.datetime,
     tick_stream: Iterator[tuple[float, dt.datetime]],
     submit_close: SubmitClose,
     estimate_close_credit: EstimateCredit | None = None,
+    armed_from_recovery: bool = False,
 ) -> StopOutcome:
     """Drive the stop state machine over a stream of (spot, now_utc) ticks."""
 
@@ -232,7 +244,9 @@ def monitor_stop(
 
     journal = store.stop_events(spread_id)
     state: StopState = state_from_journal_events(
-        breakeven=breakeven, events=[e.event for e in journal],
+        breakeven=breakeven,
+        events=[e.event for e in journal],
+        armed_from_recovery=armed_from_recovery,
     )
 
     for spot, now in tick_stream:
@@ -248,7 +262,8 @@ def monitor_stop(
                 spread_id=spread_id, ts=now.isoformat(), event="armed",
                 spot=spot, breakeven=breakeven,
             )
-            log.info("stop armed (spread=%d, spot=%.2f, breakeven=%.2f)",
+            events.emit("stop_armed", spread_id=spread_id, spot=spot, breakeven=breakeven)
+            log.info("stop armed (spread=%s, spot=%.2f, breakeven=%.2f)",
                      spread_id, spot, breakeven)
             state = new_state
 
@@ -257,6 +272,7 @@ def monitor_stop(
                 spread_id=spread_id, ts=now.isoformat(), event="suppressed",
                 spot=spot, breakeven=breakeven,
             )
+            events.emit("stop_suppressed", spread_id=spread_id, spot=spot, breakeven=breakeven)
             log.warning("stop suppressed near close; letting settlement run")
             return StopOutcome.SUPPRESSED
 
@@ -268,6 +284,11 @@ def monitor_stop(
                 store.record_stop_event(
                     spread_id=spread_id, ts=now.isoformat(), event="uneconomic",
                     spot=spot, breakeven=breakeven,
+                )
+                events.emit(
+                    "stop_uneconomic",
+                    spread_id=spread_id, spot=spot, breakeven=breakeven,
+                    estimated_close_credit=estimated_credit,
                 )
                 log.warning(
                     "stop fire skipped — estimated close credit %.2f ≤ 0; "
@@ -285,6 +306,12 @@ def monitor_stop(
             store.record_close(
                 spread_id=spread_id, closed_at=now.isoformat(),
                 exit_kind="STOP", pnl=pnl,
+            )
+            events.emit(
+                "spread_closed",
+                spread_id=spread_id, exit_kind="STOP",
+                close_fill=fill.avg_fill_price, pnl=pnl,
+                spot=spot, breakeven=breakeven,
             )
             log.warning("stop fired; close fill=%.2f pnl=$%.2f", fill.avg_fill_price, pnl)
             return StopOutcome.FIRED

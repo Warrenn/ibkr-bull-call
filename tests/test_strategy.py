@@ -5,7 +5,6 @@ from __future__ import annotations
 import datetime as dt
 import math
 from collections.abc import Iterator
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -35,7 +34,7 @@ def make_settings(**overrides: Any) -> Settings:
         risk_free_rate=0.05,
         entry_time_et=dt.time(10, 30),
         stop_enabled=True, stop_latest_sec=30,
-        state_dir="./state", log_level="INFO",
+        state_table="bull-call-test", log_level="INFO",
     )
     base.update(overrides)
     return Settings(**base)
@@ -80,9 +79,7 @@ def ticks(items: list[tuple[float, dt.datetime]]) -> Iterator[tuple[float, dt.da
     yield from items
 
 
-@pytest.fixture
-def store(tmp_path: Path) -> Store:
-    return Store(tmp_path / "state.db")
+# `store` fixture is provided by tests/conftest.py (moto-backed DynamoDB).
 
 
 # ---------- propose_trade ----------------------------------------------------

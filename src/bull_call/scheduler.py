@@ -23,6 +23,7 @@ from bull_call.cpapi.chain import (
 )
 from bull_call.cpapi.chain import fetch_0dte_call_chain, fetch_spot
 from bull_call.cpapi.client import connect, disconnect, select_account_id
+from bull_call import events
 from bull_call.cpapi.execution import (
     flatten_unmatched_leg as cp_flatten_unmatched_leg,
 )
@@ -31,6 +32,7 @@ from bull_call.cpapi.execution import (
     submit_entry_lmt,
     verify_legs_balanced as cp_verify_legs_balanced,
 )
+from bull_call.cpapi.reconcile import detect_existing_spreads
 from bull_call.cpapi.spot import open_ws, stream_ticks, subscribe_underlying
 from bull_call.state import Store
 from bull_call.strategy import (
@@ -84,6 +86,11 @@ class Scheduler:
             return
         close_utc = sessions.close_utc
 
+        # Reconcile against IBKR before entry — adopts any spread that's
+        # already open on the account into the local store, so the retry
+        # loop won't double-open if the state DB was wiped.
+        self._reconcile_with_ibkr(today_et)
+
         for symbol in self._settings.symbols:
             today_iso = today_et.isoformat()
             if self._store.today_already_opened(today_iso, symbol):
@@ -126,6 +133,48 @@ class Scheduler:
             if self._stop_event.wait(timeout=min(remaining, 60.0)):
                 return False
         return False
+
+    def _reconcile_with_ibkr(self, today_et: dt.date) -> None:
+        """Detect any spreads already open on the IBKR account today and
+        ``adopt`` them into the local store so the retry loop sees them."""
+
+        assert self._client is not None and self._account_id is not None
+
+        existing = detect_existing_spreads(
+            self._client, account_id=self._account_id, today_et=today_et,
+        )
+        if not existing:
+            return
+        today_iso = today_et.isoformat()
+        now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+        from bull_call.state import DuplicateSpreadError
+
+        for spread in existing:
+            if self._store.today_already_opened(today_iso, spread.symbol):
+                continue
+            try:
+                self._store.adopt_existing_spread(
+                    date=today_iso,
+                    symbol=spread.symbol,
+                    long_strike=spread.long_leg.strike,
+                    short_strike=spread.short_leg.strike,
+                    debit=spread.entry_debit,
+                    opened_at=now_iso,
+                )
+            except DuplicateSpreadError:
+                continue
+            events.emit(
+                "position_adopted",
+                symbol=spread.symbol,
+                long_strike=spread.long_leg.strike,
+                short_strike=spread.short_leg.strike,
+                entry_debit=spread.entry_debit,
+            )
+            log.warning(
+                "adopted existing IBKR position into local store: %s long=%s short=%s debit=%.2f",
+                spread.symbol, spread.long_leg.strike, spread.short_leg.strike,
+                spread.entry_debit,
+            )
 
     def _run_symbol(
         self, symbol: str, today_et: dt.date, today_iso: str, close_utc: dt.datetime,
@@ -203,12 +252,12 @@ class Scheduler:
             for rec in opens:
                 chain = chain_cache.get(rec.symbol)
                 if chain is None:
-                    log.error("cannot rebuild chain for monitor; spread=%d", rec.id)
+                    log.error("cannot rebuild chain for monitor; spread=%s", rec.id)
                     continue
                 long_leg = chain.contracts.get(rec.long_strike)
                 short_leg = chain.contracts.get(rec.short_strike)
                 if not (long_leg and short_leg):
-                    log.error("legs missing in chain for spread=%d", rec.id)
+                    log.error("legs missing in chain for spread=%s", rec.id)
                     continue
                 # Find underlying conid from a fresh search; cheap, returns immediately.
                 under_resp = self._client.search_contract_by_symbol(
@@ -239,8 +288,9 @@ class Scheduler:
                     tick_stream=stream_ticks(accessor, close_utc=close_utc),
                     submit_close=submit_close,
                     estimate_close_credit=estimate_credit,
+                    armed_from_recovery=rec.adopted_from_ibkr,
                 )
-                log.info("monitor for spread=%d ended: %s", rec.id, outcome.name)
+                log.info("monitor for spread=%s ended: %s", rec.id, outcome.name)
         finally:
             try:
                 ws.shutdown()
@@ -274,7 +324,17 @@ class Scheduler:
                 settle_value=spot,
                 pnl=pnl,
             )
-            log.info("settled spread=%d settle=%.2f pnl=$%.2f", rec.id, spot, pnl)
+            events.emit(
+                "spread_settled",
+                spread_id=rec.id,
+                symbol=rec.symbol,
+                long_strike=rec.long_strike,
+                short_strike=rec.short_strike,
+                debit=rec.debit,
+                settle_value=spot,
+                pnl=pnl,
+            )
+            log.info("settled spread=%s settle=%.2f pnl=$%.2f", rec.id, spot, pnl)
 
 
 def install_signal_handlers(scheduler: Scheduler) -> None:
@@ -282,10 +342,9 @@ def install_signal_handlers(scheduler: Scheduler) -> None:
         signal.signal(sig, lambda *_: scheduler.request_shutdown())
 
 
-def run_dry_run(settings: Settings, store_path: Path) -> int:
+def run_dry_run(settings: Settings) -> int:
     """Connect, fetch chain, propose a spread, log it, and exit without submitting."""
 
-    store = Store(store_path)
     client = connect()
     try:
         today_et = dt.datetime.now(_ET).date()
@@ -312,5 +371,4 @@ def run_dry_run(settings: Settings, store_path: Path) -> int:
                 )
     finally:
         disconnect(client)
-        store.close()
     return 0

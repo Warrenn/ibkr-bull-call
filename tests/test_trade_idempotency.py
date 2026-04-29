@@ -8,7 +8,6 @@ on a trading day, exactly one spread record exists per (symbol, day).
 from __future__ import annotations
 
 import datetime as dt
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -22,6 +21,7 @@ from bull_call.strikes import OptionQuote, Spread
 
 
 TODAY = "2026-04-29"
+# `store` fixture is provided by tests/conftest.py (moto-backed DynamoDB).
 
 
 def _settings() -> Settings:
@@ -30,7 +30,7 @@ def _settings() -> Settings:
         symbols=("SPX",), max_loss_usd=600.0, pop_threshold=0.50,
         risk_free_rate=0.05, entry_time_et=dt.time(10, 30),
         stop_enabled=True, stop_latest_sec=30,
-        state_dir="-", log_level="INFO",
+        state_table="bull-call-test", log_level="INFO",
     )
 
 
@@ -59,11 +59,6 @@ def _submit_entry_filled(*, debit_mid: float, **_: Any) -> FillReport:
     return FillReport(filled=True, avg_fill_price=debit_mid, order_id="entry-1")
 
 
-@pytest.fixture
-def store(tmp_path: Path) -> Store:
-    return Store(tmp_path / "state.db")
-
-
 # ---------- Idempotency: don't double-open after EC2 replacement -------------
 
 
@@ -88,12 +83,11 @@ def test_open_spread_flips_today_already_opened_to_true(store: Store) -> None:
     assert store.has_trade_today(TODAY) is True
 
 
-def test_idempotent_across_process_restart(tmp_path: Path) -> None:
-    """The check holds across a 'process restart' — i.e. an ASG replacement
-    where the new EC2 mounts the same EFS-backed SQLite file."""
+def test_idempotent_across_process_restart(ddb_table_name: str) -> None:
+    """The check holds across a 'process restart' — same DynamoDB table,
+    fresh Store handle."""
 
-    db = tmp_path / "state.db"
-    a = Store(db)
+    a = Store(ddb_table_name, region="us-east-1")
     open_spread(
         a, chain=_chain(), spread=_spread(),
         now_utc=dt.datetime(2026, 4, 29, 14, 30, tzinfo=dt.timezone.utc),
@@ -102,8 +96,8 @@ def test_idempotent_across_process_restart(tmp_path: Path) -> None:
     )
     a.close()
 
-    # Simulate the new EC2 booting: same SQLite file, fresh Store handle.
-    b = Store(db)
+    # Simulate the new EC2 booting: same DynamoDB table, fresh Store handle.
+    b = Store(ddb_table_name, region="us-east-1")
     assert b.today_already_opened(TODAY, "SPX") is True
     assert b.has_trade_today(TODAY) is True
 

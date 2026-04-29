@@ -56,12 +56,12 @@ def main() -> None:
 
     settings = _load_settings()
     _setup_logging(settings.log_level)
-    state_path = Path(settings.state_dir) / "spreads.db"
+    region = os.environ.get("AWS_REGION", "us-east-1")
 
     if args.dry_run:
-        sys.exit(run_dry_run(settings, state_path))
+        sys.exit(run_dry_run(settings))
 
-    store = Store(state_path)
+    store = Store(settings.state_table, region=region)
     scheduler = Scheduler(settings, store)
     install_signal_handlers(scheduler)
     try:
