@@ -216,7 +216,7 @@ def submit_close_market(
     place_resp = client.place_order(order_request=order, answers=_DEFAULT_ANSWERS, account_id=account_id)
     order_id = _extract_order_id(place_resp.data)
 
-    fill = _await_fill(client, order_id, phase_timeout)
+    fill = _await_fill(client, order_id, timeout_s)
     if fill is not None:
         return FillReport(filled=True, avg_fill_price=fill, order_id=order_id)
     log.error("close MKT did not fill within %ds; order left working", timeout_s)
