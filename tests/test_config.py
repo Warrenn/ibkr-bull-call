@@ -29,6 +29,7 @@ def test_load_with_defaults_and_required(monkeypatch: pytest.MonkeyPatch) -> Non
     assert s.entry_timeout_sec == 300           # default = 5 min total budget
     assert s.entry_deadline_et == dt.time(13, 0)  # default = stop at 1 pm ET
     assert s.leg_fill_timeout_sec == 30         # default = 30s leg-out grace
+    assert s.monthly_stop_on_negative_pnl is True  # default = capital gate ON
 
 
 def test_min_profit_to_loss_ratio_parses(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -110,6 +111,24 @@ def test_invalid_entry_time_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ENTRY_TIME_ET", "25:00")
     with pytest.raises(ValueError, match="ENTRY_TIME_ET"):
         load_settings()
+
+
+@pytest.mark.parametrize("value", ["false", "False", "0", "no", "off", ""])
+def test_monthly_stop_on_negative_pnl_can_be_disabled(
+    monkeypatch: pytest.MonkeyPatch, value: str,
+) -> None:
+    monkeypatch.setenv("MAX_LOSS_USD", "200")
+    monkeypatch.setenv("MONTHLY_STOP_ON_NEGATIVE_PNL", value)
+    assert load_settings().monthly_stop_on_negative_pnl is False
+
+
+@pytest.mark.parametrize("value", ["true", "True", "1", "yes", "on"])
+def test_monthly_stop_on_negative_pnl_truthy(
+    monkeypatch: pytest.MonkeyPatch, value: str,
+) -> None:
+    monkeypatch.setenv("MAX_LOSS_USD", "200")
+    monkeypatch.setenv("MONTHLY_STOP_ON_NEGATIVE_PNL", value)
+    assert load_settings().monthly_stop_on_negative_pnl is True
 
 
 def test_settings_is_frozen(monkeypatch: pytest.MonkeyPatch) -> None:

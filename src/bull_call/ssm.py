@@ -43,6 +43,7 @@ _SETTINGS_KEY_MAP: dict[str, str] = {
     "entryTimeoutSec": "ENTRY_TIMEOUT_SEC",
     "entryDeadlineEt": "ENTRY_DEADLINE_ET",
     "legFillTimeoutSec": "LEG_FILL_TIMEOUT_SEC",
+    "monthlyStopOnNegativePnl": "MONTHLY_STOP_ON_NEGATIVE_PNL",
 }
 
 

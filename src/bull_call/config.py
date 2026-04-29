@@ -53,6 +53,10 @@ class Settings:
     # in positions before treating it as a leg-out and flattening the orphan
     # leg at MKT.
     leg_fill_timeout_sec: int = 30
+    # Monthly net-negative capital gate: if month-to-date realized PnL is
+    # negative, skip new entries for the rest of the month. Existing positions
+    # continue to be managed. Resets at the first session of the next month.
+    monthly_stop_on_negative_pnl: bool = True
 
 
 def load_settings(env: dict[str, str] | None = None) -> Settings:
@@ -93,4 +97,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
             src.get("ENTRY_DEADLINE_ET", "13:00"), "ENTRY_DEADLINE_ET",
         ),
         leg_fill_timeout_sec=int(src.get("LEG_FILL_TIMEOUT_SEC", "30")),
+        monthly_stop_on_negative_pnl=_parse_bool(
+            src.get("MONTHLY_STOP_ON_NEGATIVE_PNL", "true"),
+        ),
     )
