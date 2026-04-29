@@ -328,6 +328,20 @@ class Scheduler:
                         client, long_leg=long_leg, short_leg=short_leg,
                     )
 
+                # R23a — best-effort resubscribe on a stale feed. The WS
+                # client retains its own connection; we re-issue the
+                # underlying subscription so a silently dropped channel can
+                # come back.
+                ws_ref = ws
+                under_conid_ref = under_conid
+
+                def reconnect() -> None:
+                    log.warning(
+                        "resubscribing underlying conid=%s after quote outage",
+                        under_conid_ref,
+                    )
+                    subscribe_underlying(ws_ref, conid=under_conid_ref)
+
                 outcome = monitor_stop(
                     self._store,
                     spread_id=rec.id, breakeven=breakeven,
@@ -337,6 +351,7 @@ class Scheduler:
                     estimate_close_credit=estimate_credit,
                     armed_from_recovery=rec.adopted_from_ibkr,
                     should_stop_fn=stop_event.is_set,
+                    reconnect_fn=reconnect,
                 )
                 log.info("monitor for spread=%s ended: %s", rec.id, outcome.name)
         finally:

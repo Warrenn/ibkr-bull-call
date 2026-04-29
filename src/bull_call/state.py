@@ -241,7 +241,9 @@ class Store:
         pnl: float,
     ) -> None:
         date, symbol = _split_spread_id(spread_id)
-        status = "STOPPED" if exit_kind == "STOP" else "SETTLED"
+        # All non-settle exits (STOP, OUTAGE_FLATTEN, LEGOUT_FLATTEN) map to
+        # STOPPED. The exit_kind attribute is preserved verbatim for forensics.
+        status = "SETTLED" if exit_kind == "SETTLE" else "STOPPED"
         self._table.update_item(
             Key={"pk": _spread_pk(date), "sk": symbol},
             UpdateExpression=(

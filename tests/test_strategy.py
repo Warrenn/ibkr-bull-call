@@ -40,6 +40,10 @@ def make_settings(**overrides: Any) -> Settings:
     return Settings(**base)
 
 
+def ticks_typed(items: list[tuple[float | None, dt.datetime]]) -> Iterator[tuple[float | None, dt.datetime]]:
+    yield from items
+
+
 def make_chain(spot: float = 5000.0, atm_iv: float = 0.18) -> ChainSnapshot:
     quotes = (
         OptionQuote(strike=4995.0, bid=5.00, ask=6.00),
@@ -422,6 +426,211 @@ def test_monitor_disabled_drain_respects_should_stop_fn(store: Store) -> None:
     # Stop journal stays empty (stop_enabled=False short-circuits before
     # the state machine).
     assert store.stop_events(sid) == []
+
+
+# ---------- R23a data-outage emergency flatten -----------------------------
+
+
+def _opened(store: Store, *, sid_iso: str = "2026-04-29") -> str:
+    return store.record_open(
+        date=sid_iso, symbol="SPX",
+        long_strike=4995.0, short_strike=5005.0, debit=5.50,
+        opened_at=f"{sid_iso}T14:30:00+00:00",
+    )
+
+
+def test_outage_flattens_after_max_blind(store: Store) -> None:
+    """A long enough silence (no fresh ticks) after entry triggers an
+    emergency MKT flatten regardless of price/state."""
+
+    sid = _opened(store)
+    settings = make_settings(
+        monitoring_quote_grace_sec=15,
+        monitoring_reconnect_max_attempts=3,
+        monitoring_quote_max_blind_sec=60,
+    )
+    close = dt.datetime(2026, 4, 29, 20, 0, tzinfo=dt.timezone.utc)
+    base = dt.datetime(2026, 4, 29, 15, 0, tzinfo=dt.timezone.utc)
+    closes_called: list[bool] = []
+    reconnect_calls = [0]
+
+    def submit_close(**_: Any) -> FillReport:
+        closes_called.append(True)
+        return FillReport(filled=True, avg_fill_price=2.00)
+
+    def reconnect_fn() -> None:
+        reconnect_calls[0] += 1
+
+    # Stream: one fresh tick at +0s, then 7 silent polls every 10s up to +70s.
+    # At +60s the bot must emergency-flatten and stop processing.
+    stream = ticks([
+        (5005.0, base),                                  # fresh
+        (None, base + dt.timedelta(seconds=10)),         # blind=10
+        (None, base + dt.timedelta(seconds=20)),         # blind=20  → reconnect 1
+        (None, base + dt.timedelta(seconds=30)),         # blind=30  → reconnect 2
+        (None, base + dt.timedelta(seconds=40)),         # blind=40  → reconnect 3 (cap)
+        (None, base + dt.timedelta(seconds=50)),         # blind=50  → no more reconnects
+        (None, base + dt.timedelta(seconds=60)),         # blind=60  → FLATTEN
+        # Anything past here must NOT be processed:
+        (4500.0, base + dt.timedelta(seconds=70)),
+    ])
+
+    outcome = monitor_stop(
+        store,
+        spread_id=sid, breakeven=5000.50, settings=settings, close_utc=close,
+        tick_stream=stream, submit_close=submit_close,
+        reconnect_fn=reconnect_fn,
+    )
+
+    assert outcome is StopOutcome.OUTAGE_FLATTEN
+    rec = store.get_spread(sid)
+    assert rec.status == "STOPPED"
+    assert rec.exit_kind == "OUTAGE_FLATTEN"
+    assert closes_called == [True]
+    assert reconnect_calls[0] == 3  # capped at max_reconnect_attempts
+
+
+def test_outage_recovers_within_grace_no_flatten(store: Store) -> None:
+    """A short silent gap that recovers before grace_sec must NOT flatten and
+    must NOT call reconnect_fn or emit quote_outage."""
+
+    sid = _opened(store)
+    settings = make_settings(
+        monitoring_quote_grace_sec=15,
+        monitoring_reconnect_max_attempts=3,
+        monitoring_quote_max_blind_sec=60,
+    )
+    close = dt.datetime(2026, 4, 29, 20, 0, tzinfo=dt.timezone.utc)
+    base = dt.datetime(2026, 4, 29, 15, 0, tzinfo=dt.timezone.utc)
+    reconnects: list[int] = []
+
+    stream = ticks([
+        (5005.0, base),
+        (None, base + dt.timedelta(seconds=5)),
+        (None, base + dt.timedelta(seconds=10)),  # blind=10s, < grace
+        (5006.0, base + dt.timedelta(seconds=12)),  # fresh again
+    ])
+
+    outcome = monitor_stop(
+        store,
+        spread_id=sid, breakeven=5000.50, settings=settings, close_utc=close,
+        tick_stream=stream,
+        submit_close=fake_submit_close_filled,
+        reconnect_fn=lambda: reconnects.append(1),
+    )
+
+    # No FIRE either (5005/5006 ≥ breakeven=5000.50, so it would arm but never fire).
+    assert outcome is StopOutcome.NEVER
+    assert reconnects == []
+    assert store.get_spread(sid).status == "OPEN"
+
+
+def test_outage_recovers_after_grace_continues_normal_monitoring(store: Store) -> None:
+    """Quotes go silent past the grace window, reconnect is invoked, then
+    quotes recover before max_blind. Monitoring continues normally and the
+    stop fires on the next breakeven cross."""
+
+    sid = _opened(store)
+    settings = make_settings(
+        monitoring_quote_grace_sec=15,
+        monitoring_reconnect_max_attempts=3,
+        monitoring_quote_max_blind_sec=60,
+    )
+    close = dt.datetime(2026, 4, 29, 20, 0, tzinfo=dt.timezone.utc)
+    base = dt.datetime(2026, 4, 29, 15, 0, tzinfo=dt.timezone.utc)
+    reconnects: list[int] = []
+
+    stream = ticks([
+        (5005.0, base),                                # fresh, arms
+        (None, base + dt.timedelta(seconds=10)),       # blind=10s
+        (None, base + dt.timedelta(seconds=20)),       # blind=20s → reconnect 1
+        (5006.0, base + dt.timedelta(seconds=30)),     # recovery
+        (4999.0, base + dt.timedelta(seconds=40)),     # crosses breakeven
+    ])
+
+    outcome = monitor_stop(
+        store,
+        spread_id=sid, breakeven=5000.50, settings=settings, close_utc=close,
+        tick_stream=stream,
+        submit_close=fake_submit_close_filled,
+        reconnect_fn=lambda: reconnects.append(1),
+    )
+
+    assert outcome is StopOutcome.FIRED
+    assert reconnects == [1]
+    rec = store.get_spread(sid)
+    assert rec.status == "STOPPED"
+    assert rec.exit_kind == "STOP"  # NOT OUTAGE_FLATTEN — the breakeven cross fired
+
+
+def test_outage_flatten_bypasses_uneconomic_guard(store: Store) -> None:
+    """Even if the close credit estimate is non-positive (which would normally
+    suppress an optional stop fire), the data-outage emergency flatten MUST
+    still fire — per I3 / I9: emergency-flatten paths are not gated by the
+    uneconomic-credit guard."""
+
+    sid = _opened(store)
+    settings = make_settings(
+        monitoring_quote_grace_sec=15,
+        monitoring_reconnect_max_attempts=3,
+        monitoring_quote_max_blind_sec=60,
+    )
+    close = dt.datetime(2026, 4, 29, 20, 0, tzinfo=dt.timezone.utc)
+    base = dt.datetime(2026, 4, 29, 15, 0, tzinfo=dt.timezone.utc)
+    closes_called: list[bool] = []
+
+    def submit_close(**_: Any) -> FillReport:
+        closes_called.append(True)
+        return FillReport(filled=True, avg_fill_price=0.0)
+
+    stream = ticks([
+        (5005.0, base),
+        (None, base + dt.timedelta(seconds=70)),  # blind from t=0 reference
+    ])
+
+    outcome = monitor_stop(
+        store,
+        spread_id=sid, breakeven=5000.50, settings=settings, close_utc=close,
+        tick_stream=stream, submit_close=submit_close,
+        estimate_close_credit=lambda: 0.0,
+    )
+
+    assert outcome is StopOutcome.OUTAGE_FLATTEN
+    assert closes_called == [True]
+
+
+def test_outage_silent_from_start_still_flattens(store: Store) -> None:
+    """Cold-start scenario: no fresh tick ever arrives. After max_blind from
+    the first observed (silent) tick, the bot must flatten."""
+
+    sid = _opened(store)
+    settings = make_settings(
+        monitoring_quote_grace_sec=15,
+        monitoring_reconnect_max_attempts=3,
+        monitoring_quote_max_blind_sec=60,
+    )
+    close = dt.datetime(2026, 4, 29, 20, 0, tzinfo=dt.timezone.utc)
+    base = dt.datetime(2026, 4, 29, 15, 0, tzinfo=dt.timezone.utc)
+    closes_called: list[bool] = []
+
+    def submit_close(**_: Any) -> FillReport:
+        closes_called.append(True)
+        return FillReport(filled=True, avg_fill_price=2.00)
+
+    stream = ticks([
+        (None, base),                              # baseline
+        (None, base + dt.timedelta(seconds=30)),   # blind=30s
+        (None, base + dt.timedelta(seconds=65)),   # blind=65s → FLATTEN
+    ])
+
+    outcome = monitor_stop(
+        store,
+        spread_id=sid, breakeven=5000.50, settings=settings, close_utc=close,
+        tick_stream=stream, submit_close=submit_close,
+    )
+
+    assert outcome is StopOutcome.OUTAGE_FLATTEN
+    assert closes_called == [True]
 
 
 # ---------- settlement_pnl ---------------------------------------------------

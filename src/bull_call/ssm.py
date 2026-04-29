@@ -44,6 +44,9 @@ _SETTINGS_KEY_MAP: dict[str, str] = {
     "entryDeadlineEt": "ENTRY_DEADLINE_ET",
     "legFillTimeoutSec": "LEG_FILL_TIMEOUT_SEC",
     "monthlyStopOnNegativePnl": "MONTHLY_STOP_ON_NEGATIVE_PNL",
+    "monitoringQuoteGraceSec": "MONITORING_QUOTE_GRACE_SEC",
+    "monitoringReconnectMaxAttempts": "MONITORING_RECONNECT_MAX_ATTEMPTS",
+    "monitoringQuoteMaxBlindSec": "MONITORING_QUOTE_MAX_BLIND_SEC",
 }
 
 
