@@ -291,8 +291,12 @@ class Scheduler:
         }
 
         ws = open_ws(self._client, account_id=self._account_id)
+        stop_event = self._stop_event
         try:
             for rec in opens:
+                if stop_event.is_set():
+                    log.info("shutdown requested before monitoring %s; exiting", rec.id)
+                    return
                 chain = chain_cache.get(rec.symbol)
                 if chain is None:
                     log.error("cannot rebuild chain for monitor; spread=%s", rec.id)
@@ -332,6 +336,7 @@ class Scheduler:
                     submit_close=submit_close,
                     estimate_close_credit=estimate_credit,
                     armed_from_recovery=rec.adopted_from_ibkr,
+                    should_stop_fn=stop_event.is_set,
                 )
                 log.info("monitor for spread=%s ended: %s", rec.id, outcome.name)
         finally:
