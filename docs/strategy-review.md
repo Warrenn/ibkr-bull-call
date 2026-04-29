@@ -614,7 +614,7 @@ options exchange/reg fees per contract per leg, on entry AND exit; for a
 
 Per trade and per period:
 
-- Expectancy ($/trade, after commissions + 1-tick slippage on each leg ≈ $2.60 per spread round-trip)
+- Expectancy ($/trade, **post-cost using the per-path slippage model in §6.2**, not a single generic slippage figure — each path's realised fills are scored against the model defined for that path: entry-ladder, optional stop, PT, hard-close, leg-out flatten, data-outage emergency flatten)
 - Hit rate
 - R-multiple (P&L / risk per trade)
 - Average winner / average loser
