@@ -21,9 +21,12 @@ from __future__ import annotations
 
 import itertools
 import logging
+import re
 import threading
 from dataclasses import dataclass
 from typing import Any
+
+_YEAR_MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 log = logging.getLogger(__name__)
 
@@ -304,6 +307,50 @@ class Store:
                 "breakeven": _to_decimal(breakeven),
             },
         )
+
+    # ---- monthly capital gate ---------------------------------------------
+
+    def monthly_pnl_total(self, year_month: str) -> float:
+        """Sum realized pnl across all closed spreads in the given month.
+
+        ``year_month`` is "YYYY-MM" (e.g. "2026-04"). Only STOPPED and
+        SETTLED rows contribute — OPEN rows have no realized pnl yet.
+
+        Used by the scheduler's monthly net-negative capital gate (R9).
+        Implemented as a single Scan with a server-side filter; for our
+        volume (~22 rows/month, ~250/year) this is cheap.
+        """
+
+        if not _YEAR_MONTH_RE.match(year_month):
+            raise ValueError(
+                f"year_month must be 'YYYY-MM' with 01..12; got {year_month!r}",
+            )
+
+        from boto3.dynamodb.conditions import Attr
+
+        prefix = f"SPREAD#{year_month}-"
+        filter_expr = (
+            Attr("pk").begins_with(prefix)
+            & Attr("status").is_in(["STOPPED", "SETTLED"])
+            & Attr("pnl").exists()
+        )
+
+        total = 0.0
+        last_key: dict[str, Any] | None = None
+        while True:
+            kwargs: dict[str, Any] = {"FilterExpression": filter_expr}
+            if last_key is not None:
+                kwargs["ExclusiveStartKey"] = last_key
+            resp = self._table.scan(**kwargs)
+            for item in resp.get("Items", []):
+                pnl = item.get("pnl")
+                if pnl is None:
+                    continue
+                total += float(pnl)
+            last_key = resp.get("LastEvaluatedKey")
+            if last_key is None:
+                break
+        return total
 
     def stop_events(self, spread_id: str) -> list[StopEvent]:
         from boto3.dynamodb.conditions import Key

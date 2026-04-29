@@ -91,10 +91,28 @@ class Scheduler:
         # loop won't double-open if the state DB was wiped.
         self._reconcile_with_ibkr(today_et)
 
+        gate_active = self._monthly_gate_active(today_et)
+        if gate_active:
+            year_month = today_et.strftime("%Y-%m")
+            mtd_pnl = self._store.monthly_pnl_total(year_month)
+            log.warning(
+                "monthly capital gate ACTIVE for %s (mtd_pnl=%.2f); "
+                "skipping new entries — existing positions still managed",
+                year_month, mtd_pnl,
+            )
+            events.emit(
+                "capital_gate",
+                reason="month_negative",
+                year_month=year_month,
+                mtd_pnl=mtd_pnl,
+            )
+
         for symbol in self._settings.symbols:
             today_iso = today_et.isoformat()
             if self._store.today_already_opened(today_iso, symbol):
                 log.info("%s already opened today; skipping", symbol)
+                continue
+            if gate_active:
                 continue
             self._run_symbol(symbol, today_et, today_iso, close_utc)
 
@@ -133,6 +151,21 @@ class Scheduler:
             if self._stop_event.wait(timeout=min(remaining, 60.0)):
                 return False
         return False
+
+    def _monthly_gate_active(self, today_et: dt.date) -> bool:
+        """Return True if month-to-date realized PnL is negative AND the
+        ``monthly_stop_on_negative_pnl`` setting is enabled.
+
+        Strict negativity — a flat month (pnl == 0) does NOT trip the gate.
+        Implements R9 from docs/strategy-review.md: a single bad month
+        shouldn't be able to bleed into the next, but it should stop the
+        bleeding inside the same month.
+        """
+
+        if not self._settings.monthly_stop_on_negative_pnl:
+            return False
+        year_month = today_et.strftime("%Y-%m")
+        return self._store.monthly_pnl_total(year_month) < 0.0
 
     def _reconcile_with_ibkr(self, today_et: dt.date) -> None:
         """Detect any spreads already open on the IBKR account today and

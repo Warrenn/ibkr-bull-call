@@ -106,6 +106,24 @@ def test_fetch_partial_settings_only_returns_provided_keys(ssm_client: object) -
     assert overrides == {"MAX_LOSS_USD": "500", "POP_THRESHOLD": "0.6"}
 
 
+def test_fetch_monthly_capital_gate_key_maps(ssm_client: object) -> None:
+    """The monthly capital-gate setting can be controlled via SSM JSON."""
+
+    settings_value = json.dumps({
+        "maxLossUsd": 250,
+        "monthlyStopOnNegativePnl": False,
+    })
+    stubber = Stubber(ssm_client)  # type: ignore[arg-type]
+    stubber.add_response(
+        "get_parameter",
+        {"Parameter": {"Name": "/dev/ibkr-bull-call/settings", "Type": "String", "Value": settings_value}},
+        {"Name": "/dev/ibkr-bull-call/settings", "WithDecryption": False},
+    )
+    with stubber:
+        overrides = fetch_settings_overrides(ssm_client, prefix="/dev/ibkr-bull-call")
+    assert overrides["MONTHLY_STOP_ON_NEGATIVE_PNL"] == "false"
+
+
 def test_fetch_unknown_keys_ignored(ssm_client: object) -> None:
     settings_value = json.dumps({"maxLossUsd": 200, "futureKnob": "ignored"})
     stubber = Stubber(ssm_client)  # type: ignore[arg-type]

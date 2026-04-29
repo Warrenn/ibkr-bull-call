@@ -29,7 +29,8 @@ Parameters:
         "entryDeadlineEt": "13:00",
         "legFillTimeoutSec": 30,
         "logLevel": "INFO",
-        "minProfitToLossRatio": null
+        "minProfitToLossRatio": null,
+        "monthlyStopOnNegativePnl": true
       }
     Description: |
       JSON blob of bot strategy settings. CamelCase keys per the existing
