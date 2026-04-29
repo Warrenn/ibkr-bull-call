@@ -1,0 +1,38 @@
+[Unit]
+Description=IBeam (IBKR Client Portal Gateway authenticator) for bull-call
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=15
+TimeoutStartSec=300
+EnvironmentFile=/etc/bull-call/ibeam.env
+
+# Pull the IBeam image and our PYTHONPATH for the SSM provider module
+ExecStartPre=-/usr/bin/docker rm -f ibeam
+ExecStartPre=/usr/bin/docker pull voyz/ibeam:latest
+
+# Mount /opt/bull-call/src so IBeam can import bull_call.ibeam_ssm_provider.
+# Pass through SSM_PREFIX + AWS_REGION (NOT credentials).
+ExecStart=/usr/bin/docker run --rm --name ibeam \
+    --network host \
+    -e SSM_PREFIX \
+    -e AWS_REGION \
+    -e IBEAM_GATEWAY_BASE_URL \
+    -e IBEAM_LOG_LEVEL \
+    -e IBEAM_SECRETS_SOURCE \
+    -e PYTHONPATH=/opt/bull-call/src \
+    -v /opt/bull-call/src:/opt/bull-call/src:ro \
+    voyz/ibeam:latest
+
+ExecStop=/usr/bin/docker stop ibeam
+
+# Mirror stdout/stderr to a dedicated file for CloudWatch shipping.
+StandardOutput=append:/var/log/bull-call/ibeam.log
+StandardError=append:/var/log/bull-call/ibeam.log
+
+[Install]
+WantedBy=multi-user.target

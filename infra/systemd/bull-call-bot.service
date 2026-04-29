@@ -1,0 +1,31 @@
+[Unit]
+Description=ibkr-bull-call SPX 0DTE bull call spread bot
+After=ibeam.service network-online.target
+Wants=ibeam.service network-online.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=30
+TimeoutStartSec=120
+
+# Environment file holds ONLY non-secret config (SSM prefix, region, state dir).
+EnvironmentFile=/etc/bull-call/bot.env
+
+WorkingDirectory=/opt/bull-call
+ExecStart=/usr/local/bin/uv run python -m bull_call
+
+# Mirror stdout/stderr to a dedicated file so CloudWatch agent can ship it.
+StandardOutput=append:/var/log/bull-call/bot.log
+StandardError=append:/var/log/bull-call/bot.log
+
+# Hardening
+User=root
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/bull-call /var/log/bull-call
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

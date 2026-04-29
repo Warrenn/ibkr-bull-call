@@ -1,0 +1,161 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  ibkr-bull-call network layer — minimal VPC for a single EC2 instance.
+
+  One /24 public subnet in a single AZ. Egress-only security group (no
+  ingress; admin access happens via SSM Session Manager, no SSH ports).
+
+Parameters:
+  Env:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, live]
+
+  VpcCidr:
+    Type: String
+    Default: 10.42.0.0/16
+    AllowedPattern: ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$
+
+  SubnetCidr:
+    Type: String
+    Default: 10.42.1.0/24
+    AllowedPattern: ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$
+
+Resources:
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub bull-call-${Env}-vpc
+        - Key: Project
+          Value: ibkr-bull-call
+        - Key: Env
+          Value: !Ref Env
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub bull-call-${Env}-igw
+
+  AttachIgw:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref SubnetCidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+      # Auto-assign public IPs so instances can reach AWS APIs (SSM, CW, EFS,
+      # GitHub) without a NAT gateway (~$32/mo) or VPC endpoints.
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub bull-call-${Env}-subnet
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub bull-call-${Env}-rt
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachIgw
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      # No ingress rules: nothing on the public internet can initiate a
+      # connection to the instance. AWS SGs are stateful, so reply traffic to
+      # connections the instance initiates is automatically allowed back
+      # without any ingress rule. The only ingress that exists at all is the
+      # self-referential NFS rule below (EFS mount target), which can only be
+      # used by other instances/ENIs attached to this same SG.
+      GroupDescription: bull-call EC2 SG - zero external ingress, narrow egress
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS (AWS APIs, IBKR Client Portal, Docker Hub, IBeam image, package mirrors)
+        - IpProtocol: udp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: 0.0.0.0/0
+          Description: DNS (resolve AWS / IBKR hostnames)
+      Tags:
+        - Key: Name
+          Value: !Sub bull-call-${Env}-sg
+
+  # Allow the EC2 SG to NFS-mount EFS (within VPC only).
+  EfsIngressFromEc2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId: !Ref SecurityGroup
+      Description: NFS (EFS) within the EC2 SG
+
+  EfsFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      LifecyclePolicies:
+        - TransitionToIA: AFTER_30_DAYS
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub bull-call-${Env}-state
+
+  EfsMountTarget:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      SubnetId: !Ref PublicSubnet
+      SecurityGroups:
+        - !Ref SecurityGroup
+
+Outputs:
+  VpcId:
+    Value: !Ref Vpc
+    Export:
+      Name: !Sub bull-call-${Env}-vpc-id
+  SubnetId:
+    Value: !Ref PublicSubnet
+    Export:
+      Name: !Sub bull-call-${Env}-subnet-id
+  SecurityGroupId:
+    Value: !Ref SecurityGroup
+    Export:
+      Name: !Sub bull-call-${Env}-sg-id
+  EfsFileSystemId:
+    Value: !Ref EfsFileSystem
+    Export:
+      Name: !Sub bull-call-${Env}-efs-id

@@ -1,0 +1,265 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  ibkr-bull-call compute - single self-healing EC2 in an ASG (min=max=desired=1)
+  running IBeam (Client Portal Gateway with Selenium login) + the Python bot
+  natively as a systemd service.
+
+  State persists on EFS so instance replacement (kernel panic, OOM, hardware
+  failure, AZ blip) doesn't lose the day's open spread or stop journal.
+
+  Credentials NEVER live as environment variables, files, or systemd
+  Environment= directives. IBeam invokes our custom SSM secrets provider at
+  login time; the bot uses its own boto3 session to read its strategy
+  settings from SSM. Both use the EC2 instance role for SSM access via IMDSv2.
+
+Parameters:
+  Env:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, live]
+
+  InstanceType:
+    Type: String
+    Default: t4g.small
+    AllowedValues: [t4g.small, t4g.medium, t4g.large]
+
+  Ami:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+
+  Version:
+    Type: String
+    Default: latest
+    Description: |
+      Release version to deploy. "latest" pulls
+      s3://<artifacts-bucket>/latest/bull-call.tar.gz; otherwise
+      s3://<artifacts-bucket>/releases/<Version>/bull-call.tar.gz.
+
+Resources:
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/ec2/bull-call/${Env}
+      RetentionInDays: 14
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: ssm-bull-call-readonly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                Resource:
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${Env}/ibkr-bull-call/*
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/aws/ssm
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
+        - PolicyName: artifacts-readonly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub arn:aws:s3:::bull-call-${Env}-artifacts-${AWS::AccountId}/*
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub arn:aws:s3:::bull-call-${Env}-artifacts-${AWS::AccountId}
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub bull-call-${Env}-lt
+      LaunchTemplateData:
+        ImageId: !Ref Ami
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt InstanceProfile.Arn
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub bull-call-${Env}-sg-id
+        MetadataOptions:
+          HttpTokens: required
+          HttpEndpoint: enabled
+          HttpPutResponseHopLimit: 2
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 20
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub bull-call-${Env}-bot
+              - Key: Project
+                Value: ibkr-bull-call
+              - Key: Env
+                Value: !Ref Env
+        UserData:
+          Fn::Base64: !Sub
+            - |
+              #!/bin/bash
+              set -euxo pipefail
+              dnf update -y
+              dnf install -y git docker python3.12 python3.12-pip amazon-cloudwatch-agent amazon-efs-utils nfs-utils
+              systemctl enable --now docker
+
+              # Mount EFS at /var/lib/bull-call so state survives instance replacement.
+              install -d -m 0755 /var/lib/bull-call
+              echo "${EfsFileSystemId}:/ /var/lib/bull-call efs _netdev,tls,iam 0 0" >> /etc/fstab
+              # Retry mount a few times in case the mount target isn't fully ready yet.
+              for i in 1 2 3 4 5; do
+                  if mount /var/lib/bull-call; then break; fi
+                  sleep 10
+              done
+              install -d -m 0755 /var/lib/bull-call/state /var/log/bull-call
+
+              # CloudWatch Agent: ship logs to CW.
+              mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+              cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<EOF
+              {
+                "agent": { "metrics_collection_interval": 60, "run_as_user": "root" },
+                "logs": {
+                  "logs_collected": {
+                    "files": {
+                      "collect_list": [
+                        { "file_path": "/var/log/cloud-init-output.log",
+                          "log_group_name": "/aws/ec2/bull-call/${Env}",
+                          "log_stream_name": "{instance_id}/cloud-init-output",
+                          "retention_in_days": 14 },
+                        { "file_path": "/var/log/messages",
+                          "log_group_name": "/aws/ec2/bull-call/${Env}",
+                          "log_stream_name": "{instance_id}/messages",
+                          "retention_in_days": 14 },
+                        { "file_path": "/var/log/bull-call/bot.log",
+                          "log_group_name": "/aws/ec2/bull-call/${Env}",
+                          "log_stream_name": "{instance_id}/bot",
+                          "retention_in_days": 14 },
+                        { "file_path": "/var/log/bull-call/ibeam.log",
+                          "log_group_name": "/aws/ec2/bull-call/${Env}",
+                          "log_stream_name": "{instance_id}/ibeam",
+                          "retention_in_days": 14 }
+                      ]
+                    },
+                    "log_stream_name": "{instance_id}/default"
+                  }
+                }
+              }
+              EOF
+              /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+                  -a fetch-config -m ec2 -s \
+                  -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+              systemctl enable --now amazon-cloudwatch-agent
+
+              # uv for Python dep mgmt
+              curl -LsSf https://astral.sh/uv/install.sh | sh
+              install -m 0755 /root/.local/bin/uv /usr/local/bin/uv
+
+              # Download the release tarball from the artifacts bucket.
+              mkdir -p /opt/bull-call
+              VERSION="${Version}"
+              ARTIFACTS_BUCKET="${ArtifactsBucket}"
+              if [[ "$VERSION" == "latest" ]]; then
+                  S3_KEY="latest/bull-call.tar.gz"
+              else
+                  S3_KEY="releases/${!VERSION}/bull-call.tar.gz"
+              fi
+              for i in 1 2 3 4 5; do
+                  if aws s3 cp "s3://$ARTIFACTS_BUCKET/$S3_KEY" /tmp/bull-call.tar.gz; then break; fi
+                  sleep 10
+              done
+              tar -xzf /tmp/bull-call.tar.gz -C /opt/bull-call
+              rm /tmp/bull-call.tar.gz
+              cd /opt/bull-call
+              uv sync --extra aws
+
+              # Install systemd units
+              install -m 0644 /opt/bull-call/infra/systemd/ibeam.service /etc/systemd/system/ibeam.service
+              install -m 0644 /opt/bull-call/infra/systemd/bull-call-bot.service /etc/systemd/system/bull-call-bot.service
+
+              # Drop the IBeam container env (no credentials here)
+              install -d -m 0755 /etc/bull-call
+              cat > /etc/bull-call/ibeam.env <<EOF
+              IBEAM_GATEWAY_BASE_URL=https://localhost:5000
+              IBEAM_LOG_LEVEL=INFO
+              IBEAM_SECRETS_SOURCE=bull_call.ibeam_ssm_provider:SsmSecretsProvider
+              SSM_PREFIX=/${Env}/ibkr-bull-call
+              AWS_REGION=${AWS::Region}
+              EOF
+              cat > /etc/bull-call/bot.env <<EOF
+              SSM_PREFIX=/${Env}/ibkr-bull-call
+              AWS_REGION=${AWS::Region}
+              STATE_DIR=/var/lib/bull-call/state
+              EOF
+
+              systemctl daemon-reload
+              systemctl enable --now ibeam.service
+              systemctl enable --now bull-call-bot.service
+            - EfsFileSystemId:
+                Fn::ImportValue: !Sub bull-call-${Env}-efs-id
+              ArtifactsBucket:
+                Fn::ImportValue: !Sub bull-call-${Env}-artifacts-bucket
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub bull-call-${Env}-asg
+      MinSize: '1'
+      MaxSize: '1'
+      DesiredCapacity: '1'
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 600
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub bull-call-${Env}-subnet-id
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      Tags:
+        - Key: Name
+          Value: !Sub bull-call-${Env}-asg
+          PropagateAtLaunch: false
+        - Key: Project
+          Value: ibkr-bull-call
+          PropagateAtLaunch: true
+        - Key: Env
+          Value: !Ref Env
+          PropagateAtLaunch: true
+
+Outputs:
+  AutoScalingGroupName:
+    Value: !Ref AutoScalingGroup
+    Description: ASG holding exactly one running bull-call instance
+  SessionManagerCommandHint:
+    Description: Get the current instance ID and start a session
+    Value: !Sub |
+      aws --profile busyweb --region ${AWS::Region} ec2 describe-instances \
+          --filters Name=tag:aws:autoscaling:groupName,Values=bull-call-${Env}-asg Name=instance-state-name,Values=running \
+          --query 'Reservations[].Instances[].InstanceId' --output text \
+        | xargs -I{} aws --profile busyweb --region ${AWS::Region} ssm start-session --target {}
