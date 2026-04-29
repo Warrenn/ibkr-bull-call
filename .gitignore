@@ -216,3 +216,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Claude Code: project allowlist is committed; personal/transient bits aren't.
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/projects/
+
+# Bot runtime state and logs (never commit credentials or position history)
+state/
+logs/
+.env

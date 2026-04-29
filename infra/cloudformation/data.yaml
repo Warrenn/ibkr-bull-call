@@ -1,0 +1,165 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  ibkr-bull-call data layer — SSM Parameter Store entries.
+
+  Creates the strategy settings JSON and credential placeholders. Credentials
+  must be updated post-deploy via `aws ssm put-parameter --overwrite` (see
+  infra/scripts/seed-secrets.sh) — this template never holds the actual
+  credentials in stack state.
+
+Parameters:
+  Env:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, live]
+    Description: Environment prefix under SSM (matches existing /dev/* /live/* convention).
+
+  StrategySettings:
+    Type: String
+    Default: |
+      {
+        "symbols": "SPX",
+        "maxLossUsd": 200,
+        "popThreshold": 0.55,
+        "riskFreeRate": 0.05,
+        "entryTimeEt": "10:30",
+        "stopEnabled": true,
+        "stopLatestSec": 30,
+        "entryTimeoutSec": 300,
+        "entryDeadlineEt": "13:00",
+        "legFillTimeoutSec": 30,
+        "logLevel": "INFO",
+        "minProfitToLossRatio": null
+      }
+    Description: |
+      JSON blob of bot strategy settings. CamelCase keys per the existing
+      /dev/funding-arbitrage/settings convention. Updateable via
+      `aws ssm put-parameter --overwrite` without redeploying the stack.
+
+Resources:
+
+  # DynamoDB single-table store for spread records + stop journal.
+  # Pay-per-request billing: ~150 writes/month + ~200 reads/month, well within
+  # the always-free tier (25 GB / 25 RCU / 25 WCU). Storage of the table
+  # itself is also <1 GB long-term, so realistic monthly cost is $0.
+  StateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub bull-call-${Env}-state
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Project
+          Value: ibkr-bull-call
+        - Key: Env
+          Value: !Ref Env
+
+  # S3 bucket holding release artifacts (tarballs of the bot at a tagged
+  # version). Bucket name is `bull-call-{env}-artifacts-{account}` so it's
+  # globally unique without collisions across accounts.
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub bull-call-${Env}-artifacts-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-noncurrent-after-90-days
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+
+  SettingsParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /${Env}/ibkr-bull-call/settings
+      Type: String
+      Tier: Standard
+      Value: !Ref StrategySettings
+      Description: Strategy settings (JSON). Read by the bot at startup via boto3.
+      Tags:
+        Project: ibkr-bull-call
+        Env: !Ref Env
+
+  # Placeholder for the IBKR username SecureString.  CloudFormation cannot
+  # create SecureString parameters with a real value (only String/StringList).
+  # We create a dummy String parameter as a "marker" that documents the path,
+  # and the operator runs seed-secrets.sh to replace it with a SecureString
+  # holding the real value.  The IAM policy in compute.yaml grants access to
+  # the SecureString form by ARN — which works regardless of whether the param
+  # is currently String or SecureString.
+  TwsUseridPlaceholder:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /${Env}/ibkr-bull-call/tws_userid
+      Type: String
+      Tier: Standard
+      Value: REPLACE-ME-VIA-SEED-SECRETS-SH
+      Description: |
+        IBKR username placeholder. Replace with a SecureString containing the
+        real value before the bot can login:
+          aws ssm put-parameter --name /<env>/ibkr-bull-call/tws_userid \\
+              --value "<your-username>" --type SecureString --overwrite
+      Tags:
+        Project: ibkr-bull-call
+        Env: !Ref Env
+
+  TwsPasswordPlaceholder:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /${Env}/ibkr-bull-call/tws_password
+      Type: String
+      Tier: Standard
+      Value: REPLACE-ME-VIA-SEED-SECRETS-SH
+      Description: |
+        IBKR password placeholder. Replace with a SecureString:
+          aws ssm put-parameter --name /<env>/ibkr-bull-call/tws_password \\
+              --value "<your-password>" --type SecureString --overwrite
+      Tags:
+        Project: ibkr-bull-call
+        Env: !Ref Env
+
+Outputs:
+  SsmPrefix:
+    Description: SSM parameter prefix for this environment
+    Value: !Sub /${Env}/ibkr-bull-call
+    Export:
+      Name: !Sub bull-call-${Env}-ssm-prefix
+  ArtifactsBucketName:
+    Description: Name of the release artifacts bucket
+    Value: !Ref ArtifactsBucket
+    Export:
+      Name: !Sub bull-call-${Env}-artifacts-bucket
+  StateTableName:
+    Description: DynamoDB table name for spreads + stop journal
+    Value: !Ref StateTable
+    Export:
+      Name: !Sub bull-call-${Env}-state-table
+  StateTableArn:
+    Description: DynamoDB table ARN
+    Value: !GetAtt StateTable.Arn
+    Export:
+      Name: !Sub bull-call-${Env}-state-table-arn

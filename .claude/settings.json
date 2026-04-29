@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv sync *)",
+      "Bash(uv venv *)",
+      "Bash(uv add *)",
+      "Bash(uv lock *)",
+      "Bash(uv pip *)",
+      "Bash(uv run pytest *)",
+      "Bash(uv run mypy *)",
+      "Bash(but branch *)",
+      "Bash(but push *)",
+      "Bash(but pull)",
+      "Bash(but merge *)",
+      "Bash(docker compose build *)",
+      "Bash(docker compose config *)",
+      "Bash(docker compose ps *)",
+      "Bash(docker compose logs *)"
+    ]
+  }
+}
