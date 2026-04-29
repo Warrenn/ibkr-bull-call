@@ -249,13 +249,22 @@ def monitor_stop(
     submit_close: SubmitClose,
     estimate_close_credit: EstimateCredit | None = None,
     armed_from_recovery: bool = False,
+    should_stop_fn: Callable[[], bool] = lambda: False,
 ) -> StopOutcome:
-    """Drive the stop state machine over a stream of (spot, now_utc) ticks."""
+    """Drive the stop state machine over a stream of (spot, now_utc) ticks.
+
+    ``should_stop_fn`` is checked at the top of every tick iteration so a
+    SIGTERM/SIGINT received mid-session can short-circuit the monitor loop
+    promptly — without it, the loop blocks until ``close_utc`` (potentially
+    hours) and the daemon refuses to exit. Returns ``StopOutcome.NEVER`` on
+    shutdown so the caller treats it as "no stop fired this session."
+    """
 
     if not settings.stop_enabled:
         log.info("stop disabled — draining tick stream until close")
         for _ in tick_stream:
-            pass
+            if should_stop_fn():
+                return StopOutcome.NEVER
         return StopOutcome.NEVER
 
     journal = store.stop_events(spread_id)
@@ -266,6 +275,9 @@ def monitor_stop(
     )
 
     for spot, now in tick_stream:
+        if should_stop_fn():
+            log.info("shutdown requested for spread=%s monitor; exiting", spread_id)
+            return StopOutcome.NEVER
         if now >= close_utc:
             return StopOutcome.NEVER
         new_state, action = advance(

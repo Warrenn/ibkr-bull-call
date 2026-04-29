@@ -307,6 +307,123 @@ def test_monitor_fires_when_close_credit_positive(store: Store) -> None:
     assert outcome is StopOutcome.FIRED
 
 
+# ---------- SIGTERM during monitor (shutdown handling) -------------------
+
+
+def test_monitor_exits_immediately_when_should_stop_at_start(store: Store) -> None:
+    """If shutdown is requested before any tick, monitor returns NEVER and
+    never invokes submit_close — even if subsequent ticks would have fired."""
+
+    sid = store.record_open(
+        date="2026-04-29", symbol="SPX",
+        long_strike=4995.0, short_strike=5005.0, debit=5.50,
+        opened_at="2026-04-29T14:30:00+00:00",
+    )
+    closes_called: list[bool] = []
+
+    def submit_close(**_: Any) -> FillReport:
+        closes_called.append(True)
+        return FillReport(filled=True, avg_fill_price=1.50)
+
+    outcome = monitor_stop(
+        store,
+        spread_id=sid, breakeven=5000.50, settings=make_settings(),
+        close_utc=dt.datetime(2026, 4, 29, 20, 0, tzinfo=dt.timezone.utc),
+        tick_stream=ticks([
+            (5001.0, dt.datetime(2026, 4, 29, 15, 0, tzinfo=dt.timezone.utc)),
+            (4999.0, dt.datetime(2026, 4, 29, 18, 0, tzinfo=dt.timezone.utc)),
+        ]),
+        submit_close=submit_close,
+        should_stop_fn=lambda: True,
+    )
+
+    assert outcome is StopOutcome.NEVER
+    assert closes_called == []
+    rec = store.get_spread(sid)
+    assert rec.status == "OPEN"
+    assert store.stop_events(sid) == []
+
+
+def test_monitor_exits_after_should_stop_set_mid_stream(store: Store) -> None:
+    """Stop is requested between ticks; monitor exits at the next iteration
+    boundary, before processing the would-fire tick."""
+
+    sid = store.record_open(
+        date="2026-04-29", symbol="SPX",
+        long_strike=4995.0, short_strike=5005.0, debit=5.50,
+        opened_at="2026-04-29T14:30:00+00:00",
+    )
+    flag = {"stop": False}
+    closes_called: list[bool] = []
+
+    def submit_close(**_: Any) -> FillReport:
+        closes_called.append(True)
+        return FillReport(filled=True, avg_fill_price=1.50)
+
+    def stream():
+        yield (5001.0, dt.datetime(2026, 4, 29, 15, 0, tzinfo=dt.timezone.utc))
+        flag["stop"] = True
+        yield (4999.0, dt.datetime(2026, 4, 29, 18, 0, tzinfo=dt.timezone.utc))
+
+    outcome = monitor_stop(
+        store,
+        spread_id=sid, breakeven=5000.50, settings=make_settings(),
+        close_utc=dt.datetime(2026, 4, 29, 20, 0, tzinfo=dt.timezone.utc),
+        tick_stream=stream(),
+        submit_close=submit_close,
+        should_stop_fn=lambda: flag["stop"],
+    )
+
+    assert outcome is StopOutcome.NEVER
+    assert closes_called == []
+    # ARM happened on the first tick (before stop was set)
+    journal_events = [e.event for e in store.stop_events(sid)]
+    assert journal_events == ["armed"]
+    assert store.get_spread(sid).status == "OPEN"
+
+
+def test_monitor_disabled_drain_respects_should_stop_fn(store: Store) -> None:
+    """When stop_enabled=False the function drains the tick stream until
+    close. With shutdown requested it should exit early instead of looping
+    over ticks indefinitely."""
+
+    sid = store.record_open(
+        date="2026-04-29", symbol="SPX",
+        long_strike=4995.0, short_strike=5005.0, debit=5.50,
+        opened_at="2026-04-29T14:30:00+00:00",
+    )
+    settings = make_settings(stop_enabled=False)
+    flag = {"first_seen": False}
+
+    def stop_fn() -> bool:
+        # The drain loop calls this AFTER pulling each tick. Flip on after
+        # the first one so we exit before draining the whole sequence.
+        if flag["first_seen"]:
+            return True
+        flag["first_seen"] = True
+        return False
+
+    def stream():
+        yield (5001.0, dt.datetime(2026, 4, 29, 15, 0, tzinfo=dt.timezone.utc))
+        yield (5002.0, dt.datetime(2026, 4, 29, 16, 0, tzinfo=dt.timezone.utc))
+        # Sentinel so a regression that drains the whole stream is detectable
+        # via store assertions, not test hangs.
+        yield (5003.0, dt.datetime(2026, 4, 29, 17, 0, tzinfo=dt.timezone.utc))
+
+    outcome = monitor_stop(
+        store,
+        spread_id=sid, breakeven=5000.50, settings=settings,
+        close_utc=dt.datetime(2026, 4, 29, 20, 0, tzinfo=dt.timezone.utc),
+        tick_stream=stream(),
+        submit_close=fake_submit_close_filled,
+        should_stop_fn=stop_fn,
+    )
+    assert outcome is StopOutcome.NEVER
+    # Stop journal stays empty (stop_enabled=False short-circuits before
+    # the state machine).
+    assert store.stop_events(sid) == []
+
+
 # ---------- settlement_pnl ---------------------------------------------------
 
 
