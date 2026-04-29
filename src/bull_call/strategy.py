@@ -91,6 +91,7 @@ def attempt_until_filled(
     flatten_unmatched_leg: FlattenUnmatchedLeg,
     now_fn: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.timezone.utc),
     sleep_fn: Callable[[float], None] = time.sleep,
+    should_stop_fn: Callable[[], bool] = lambda: False,
     soft_retry_delay_s: float = 60.0,
 ) -> OpenResult | None:
     """Keep submitting entry orders until one fills, deadline passes, or a
@@ -105,15 +106,26 @@ def attempt_until_filled(
     A *hard* retry (limit order cancelled by us after the 5-min budget)
     proceeds immediately — the cancel cycle is itself the delay.
 
+    ``sleep_fn`` and ``should_stop_fn`` together support clean shutdown:
+    in production, scheduler wires ``sleep_fn = stop_event.wait`` (returns
+    early on signal) and ``should_stop_fn = stop_event.is_set`` (checked
+    each iteration). The retry loop honours SIGTERM mid-soft-retry instead
+    of blocking up to ``soft_retry_delay_s`` seconds before noticing.
+
     Stops:
       - filled and legs balanced -> return OpenResult (only outcome that
         creates a SQLite spread row)
       - filled but legs not balanced within ``settings.leg_fill_timeout_sec``
         -> flatten the orphan leg at MKT, return None, do NOT retry today
       - now >= deadline_utc -> return None (no trade today)
+      - should_stop_fn() returns True -> return None (graceful shutdown)
     """
 
     while True:
+        if should_stop_fn():
+            log.info("shutdown requested for %s entry loop; exiting", symbol)
+            return None
+
         now = now_fn()
         if now >= deadline_utc:
             log.info("entry deadline reached for %s; no trade today", symbol)
@@ -123,6 +135,8 @@ def attempt_until_filled(
         if chain is None:
             log.info("no chain for %s; soft-retrying in %.0fs", symbol, soft_retry_delay_s)
             sleep_fn(soft_retry_delay_s)
+            if should_stop_fn():
+                return None
             continue
 
         spread = propose_trade(chain, settings=settings, now_utc=now, close_utc=close_utc)
@@ -130,6 +144,8 @@ def attempt_until_filled(
             log.info("no viable spread for %s; soft-retrying in %.0fs",
                      symbol, soft_retry_delay_s)
             sleep_fn(soft_retry_delay_s)
+            if should_stop_fn():
+                return None
             continue
 
         long_leg = chain.contracts[spread.long_strike]

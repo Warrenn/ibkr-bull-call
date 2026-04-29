@@ -154,3 +154,89 @@ def test_entry_timeout_default_is_5_minutes() -> None:
 
     sig = inspect.signature(submit_entry_lmt)
     assert sig.parameters["timeout_s"].default == 300.0
+
+
+# ---------- submit_close_market regression -----------------------------------
+
+
+def test_submit_close_market_does_not_NameError(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression for strategy-review §3.1: the close path used to reference
+    `phase_timeout` (a name local to submit_entry_lmt) which would have raised
+    NameError on the first stop fire in production. Drive the function with a
+    fake client that returns a Filled status; the test passes if the call
+    completes without raising.
+    """
+
+    from bull_call.chain import OptionContract
+    from bull_call.cpapi import execution
+
+    long_leg = OptionContract(strike=4995.0, conid=111, right="C", expiry="20260429")
+    short_leg = OptionContract(strike=5005.0, conid=222, right="C", expiry="20260429")
+
+    place_calls: list[Any] = []
+    status_calls: list[str] = []
+
+    class _Resp:
+        def __init__(self, data: Any) -> None:
+            self.data = data
+
+    class FakeClient:
+        def place_order(self, *, order_request: Any, answers: Any, account_id: str) -> _Resp:
+            place_calls.append(order_request)
+            return _Resp([{"order_id": "close-1"}])
+
+        def order_status(self, *, order_id: str) -> _Resp:
+            status_calls.append(order_id)
+            return _Resp({"order_status": "Filled", "average_price": "1.20"})
+
+    fake_client = FakeClient()
+
+    # Don't actually sleep through a 15s timeout if the test is slow.
+    monkeypatch.setattr(execution.time, "sleep", lambda _s: None)
+
+    fill = execution.submit_close_market(
+        fake_client,                           # type: ignore[arg-type]
+        account_id="A1",
+        long_leg=long_leg,
+        short_leg=short_leg,
+        timeout_s=2.0,
+    )
+
+    assert fill.filled is True
+    assert fill.avg_fill_price == pytest.approx(1.20)
+    assert place_calls and status_calls       # both API methods were invoked
+
+
+def test_submit_close_market_unfilled_returns_filled_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If order_status never reports Filled, submit_close_market returns
+    filled=False (and the order is left working — caller decides what to do).
+    Confirms the timeout-arg path also doesn't NameError."""
+
+    from bull_call.chain import OptionContract
+    from bull_call.cpapi import execution
+
+    long_leg = OptionContract(strike=4995.0, conid=111, right="C", expiry="20260429")
+    short_leg = OptionContract(strike=5005.0, conid=222, right="C", expiry="20260429")
+
+    class _Resp:
+        def __init__(self, data: Any) -> None:
+            self.data = data
+
+    class FakeClient:
+        def place_order(self, *, order_request: Any, answers: Any, account_id: str) -> _Resp:
+            return _Resp([{"order_id": "close-1"}])
+
+        def order_status(self, *, order_id: str) -> _Resp:
+            return _Resp({"order_status": "Submitted"})  # never Filled
+
+    monkeypatch.setattr(execution.time, "sleep", lambda _s: None)
+
+    fill = execution.submit_close_market(
+        FakeClient(),                          # type: ignore[arg-type]
+        account_id="A1",
+        long_leg=long_leg,
+        short_leg=short_leg,
+        timeout_s=0.5,
+    )
+
+    assert fill.filled is False

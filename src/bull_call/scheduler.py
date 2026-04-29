@@ -216,6 +216,14 @@ class Scheduler:
                 long_leg=long_leg, short_leg=short_leg,
             )
 
+        # §3.7: signal-aware sleep — Event.wait responds to SIGTERM during
+        # soft retries, so the bot can exit cleanly mid-sleep instead of
+        # waiting up to soft_retry_delay_s seconds.
+        stop_event = self._stop_event
+
+        def signal_aware_sleep(seconds: float) -> None:
+            stop_event.wait(timeout=seconds)
+
         attempt_until_filled(
             self._store,
             symbol=symbol,
@@ -227,6 +235,8 @@ class Scheduler:
             submit_entry=submit_entry,
             verify_legs_balanced=verify_legs_balanced,
             flatten_unmatched_leg=flatten_unmatched_leg,
+            sleep_fn=signal_aware_sleep,
+            should_stop_fn=stop_event.is_set,
         )
 
     def _monitor_open_spreads(

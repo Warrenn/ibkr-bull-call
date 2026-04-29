@@ -50,12 +50,22 @@ def detect_existing_spreads(
         return []
     raw = resp.data or []
 
-    # Filter to today's CALL options.
+    # Filter to today's SPXW CALL options. Hard-gate on tradingClass to refuse
+    # SPX (AM-settled monthly) — those have different settlement semantics
+    # and the bot's monitor / settlement logic assumes SPXW (PM-settled,
+    # 4 pm ET). See strategy-review.md §3.2.
     candidates: list[dict] = []
     for row in raw:
         if (row.get("assetClass") or "").upper() != "OPT":
             continue
         if (row.get("putOrCall") or "").upper() != "C":
+            continue
+        trading_class = (row.get("tradingClass") or row.get("contractClass") or "").upper()
+        if trading_class != "SPXW":
+            log.warning(
+                "skipping non-SPXW position during reconcile: ticker=%s tradingClass=%r",
+                row.get("ticker"), trading_class,
+            )
             continue
         # IBKR exposes maturity under different keys depending on version;
         # try the common ones.
@@ -98,9 +108,29 @@ def detect_existing_spreads(
             continue
         long_avg = float(long_p.get("avgCost") or 0.0)
         short_avg = float(short_p.get("avgCost") or 0.0)
-        # IBKR convention: long avgCost > 0, short avgCost < 0.
-        # Net entry debit per share = sum (short already carries its sign).
-        entry_debit = abs(long_avg) - abs(short_avg)
+        # IBKR signed-cost invariant: long position's avgCost is positive
+        # (premium paid), short position's avgCost is negative (premium
+        # received). If the API ever emits unsigned costs, our debit
+        # arithmetic would silently mis-compute. Refuse to adopt rather
+        # than guess. See strategy-review.md §3.6.
+        if long_avg <= 0:
+            log.error(
+                "reconcile: rejecting %s — long leg conid=%d has non-positive "
+                "avgCost=%.4f (expected > 0). Refusing to adopt with ambiguous cost basis.",
+                ticker, int(long_p["conid"]), long_avg,
+            )
+            continue
+        if short_avg >= 0:
+            log.error(
+                "reconcile: rejecting %s — short leg conid=%d has non-negative "
+                "avgCost=%.4f (expected < 0). Refusing to adopt with ambiguous cost basis.",
+                ticker, int(short_p["conid"]), short_avg,
+            )
+            continue
+        # Net entry debit per share = long_avg + short_avg (short already
+        # carries its negative sign). This works correctly only when the
+        # signed-cost invariant above holds.
+        entry_debit = long_avg + short_avg
         spreads.append(ExistingSpread(
             symbol=ticker,
             long_leg=OptionContract(

@@ -319,3 +319,78 @@ def test_legout_triggers_flatten_and_returns_none(store: Store) -> None:
     assert len(submit_calls) == 1   # one attempt only — leg-out blocks retry
     assert len(flatten_calls) == 1
     assert store.has_trade_today("2026-04-29") is False  # no record created
+
+
+# ---------- §3.7 should_stop_fn signal-aware shutdown ----------------------
+
+
+def test_loop_exits_immediately_when_should_stop_returns_true(store: Store) -> None:
+    """Scheduler signals shutdown via should_stop_fn — the retry loop must
+    exit at the top of the next iteration, not block until the deadline."""
+
+    submit_count = 0
+
+    def submit_entry(**_):
+        nonlocal submit_count
+        submit_count += 1
+        return FillReport(filled=True, avg_fill_price=4.50)
+
+    result = attempt_until_filled(
+        store,
+        symbol="SPX", today_iso="2026-04-29",
+        close_utc=CLOSE_UTC, deadline_utc=DEADLINE_UTC,
+        settings=_settings(),
+        fetch_chain=lambda: _chain(),
+        submit_entry=submit_entry,
+        verify_legs_balanced=lambda **_: True,
+        flatten_unmatched_leg=lambda **_: None,
+        now_fn=_clock(dt.datetime(2026, 4, 29, 14, 30, tzinfo=dt.timezone.utc),
+                      dt.timedelta(seconds=30)),
+        sleep_fn=lambda _: None,
+        should_stop_fn=lambda: True,
+    )
+
+    assert result is None
+    assert submit_count == 0   # never even reached submit_entry
+
+
+def test_loop_exits_after_should_stop_set_during_soft_retry(store: Store) -> None:
+    """If should_stop becomes True during a soft retry sleep, the loop
+    exits at the post-sleep check rather than continuing to fetch_chain
+    again."""
+
+    chain_calls = 0
+    stop_flag = {"set": False}
+
+    def fetch_chain():
+        nonlocal chain_calls
+        chain_calls += 1
+        return None  # always trigger soft retry
+
+    sleeps: list[float] = []
+
+    def sleep_fn(secs: float) -> None:
+        sleeps.append(secs)
+        # Simulate SIGTERM arriving during the sleep.
+        stop_flag["set"] = True
+
+    result = attempt_until_filled(
+        store,
+        symbol="SPX", today_iso="2026-04-29",
+        close_utc=CLOSE_UTC, deadline_utc=DEADLINE_UTC,
+        settings=_settings(),
+        fetch_chain=fetch_chain,
+        submit_entry=lambda **kw: FillReport(filled=True, avg_fill_price=4.50),
+        verify_legs_balanced=lambda **_: True,
+        flatten_unmatched_leg=lambda **_: None,
+        now_fn=_clock(dt.datetime(2026, 4, 29, 14, 30, tzinfo=dt.timezone.utc),
+                      dt.timedelta(seconds=30)),
+        sleep_fn=sleep_fn,
+        should_stop_fn=lambda: stop_flag["set"],
+        soft_retry_delay_s=60.0,
+    )
+
+    assert result is None
+    # First iteration: fetch returned None, slept, stop became set, exited.
+    assert chain_calls == 1
+    assert sleeps == [60.0]
