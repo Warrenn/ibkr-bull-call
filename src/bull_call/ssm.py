@@ -39,7 +39,8 @@ _SETTINGS_KEY_MAP: dict[str, str] = {
     "ibPort": "IB_PORT",
     "ibClientId": "IB_CLIENT_ID",
     "stateDir": "STATE_DIR",
-    "minLossProfitRatio": "MIN_LOSS_PROFIT_RATIO",
+    "minProfitToLossRatio": "MIN_PROFIT_TO_LOSS_RATIO",
+    "entryTimeoutSec": "ENTRY_TIMEOUT_SEC",
 }
 
 

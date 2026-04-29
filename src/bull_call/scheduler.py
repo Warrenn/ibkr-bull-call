@@ -143,8 +143,17 @@ class Scheduler:
         client = self._client
         account_id = self._account_id
 
+        ratio = self._settings.min_profit_to_loss_ratio
+        entry_timeout = float(self._settings.entry_timeout_sec)
+
         def submit_entry(**kw):  # type: ignore[no-untyped-def]
-            return submit_entry_lmt(client, account_id=account_id, **kw)
+            return submit_entry_lmt(
+                client,
+                account_id=account_id,
+                min_profit_to_loss_ratio=ratio,
+                timeout_s=entry_timeout,
+                **kw,
+            )
 
         open_spread(
             self._store,

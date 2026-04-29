@@ -25,8 +25,9 @@ Parameters:
         "entryTimeEt": "10:30",
         "stopEnabled": true,
         "stopLatestSec": 30,
+        "entryTimeoutSec": 300,
         "logLevel": "INFO",
-        "minLossProfitRatio": null
+        "minProfitToLossRatio": null
       }
     Description: |
       JSON blob of bot strategy settings. CamelCase keys per the existing

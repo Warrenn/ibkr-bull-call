@@ -25,21 +25,29 @@ def test_load_with_defaults_and_required(monkeypatch: pytest.MonkeyPatch) -> Non
     assert s.stop_enabled is True
     assert s.stop_latest_sec == 30
     assert s.log_level == "INFO"
-    assert s.min_loss_profit_ratio is None  # default = no constraint
+    assert s.min_profit_to_loss_ratio is None  # default = no constraint
+    assert s.entry_timeout_sec == 300           # default = 5 min total budget
 
 
-def test_min_loss_profit_ratio_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_min_profit_to_loss_ratio_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MAX_LOSS_USD", "500")
-    monkeypatch.setenv("MIN_LOSS_PROFIT_RATIO", "10")
+    monkeypatch.setenv("MIN_PROFIT_TO_LOSS_RATIO", "0.10")
     s = load_settings()
-    assert s.min_loss_profit_ratio == 10.0
+    assert s.min_profit_to_loss_ratio == 0.10
 
 
-def test_min_loss_profit_ratio_empty_means_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_min_profit_to_loss_ratio_empty_means_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MAX_LOSS_USD", "500")
-    monkeypatch.setenv("MIN_LOSS_PROFIT_RATIO", "")
+    monkeypatch.setenv("MIN_PROFIT_TO_LOSS_RATIO", "")
     s = load_settings()
-    assert s.min_loss_profit_ratio is None
+    assert s.min_profit_to_loss_ratio is None
+
+
+def test_entry_timeout_sec_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAX_LOSS_USD", "500")
+    monkeypatch.setenv("ENTRY_TIMEOUT_SEC", "120")
+    s = load_settings()
+    assert s.entry_timeout_sec == 120
 
 
 def test_missing_max_loss_raises(monkeypatch: pytest.MonkeyPatch) -> None:

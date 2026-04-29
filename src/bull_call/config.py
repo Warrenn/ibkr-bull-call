@@ -38,7 +38,13 @@ class Settings:
     stop_latest_sec: int
     state_dir: str
     log_level: str
-    min_loss_profit_ratio: float | None = None
+    # Minimum (max_profit / max_loss) ratio. e.g. 0.10 means "for every $1000
+    # of possible loss I require at least $100 of possible profit".
+    min_profit_to_loss_ratio: float | None = None
+    # Total budget (seconds) the entry limit order is allowed to work before
+    # we cancel and walk away. Split 50/50 between the initial-price phase
+    # and the one-tick reprice phase.
+    entry_timeout_sec: int = 300
 
 
 def load_settings(env: dict[str, str] | None = None) -> Settings:
@@ -55,8 +61,10 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     except ValueError as exc:
         raise ValueError(f"MAX_LOSS_USD must be a number; got {raw_max_loss!r}") from exc
 
-    raw_min_ratio = src.get("MIN_LOSS_PROFIT_RATIO", "").strip()
-    min_loss_profit_ratio: float | None = float(raw_min_ratio) if raw_min_ratio else None
+    raw_min_ratio = src.get("MIN_PROFIT_TO_LOSS_RATIO", "").strip()
+    min_profit_to_loss_ratio: float | None = (
+        float(raw_min_ratio) if raw_min_ratio else None
+    )
 
     return Settings(
         ib_host=src.get("IB_HOST", "ibgateway"),
@@ -71,5 +79,6 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         stop_latest_sec=int(src.get("STOP_LATEST_SEC", "30")),
         state_dir=src.get("STATE_DIR", "./state"),
         log_level=src.get("LOG_LEVEL", "INFO").upper(),
-        min_loss_profit_ratio=min_loss_profit_ratio,
+        min_profit_to_loss_ratio=min_profit_to_loss_ratio,
+        entry_timeout_sec=int(src.get("ENTRY_TIMEOUT_SEC", "300")),
     )

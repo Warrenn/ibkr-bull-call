@@ -44,7 +44,7 @@ def test_fetch_settings_overrides_parses_json(ssm_client: object) -> None:
         "stopEnabled": True,
         "stopLatestSec": 30,
         "logLevel": "INFO",
-        "minLossProfitRatio": 10,
+        "minProfitToLossRatio": 0.10,
     })
     stubber = Stubber(ssm_client)  # type: ignore[arg-type]
     stubber.add_response(
@@ -67,7 +67,7 @@ def test_fetch_settings_overrides_parses_json(ssm_client: object) -> None:
         "STOP_ENABLED": "true",
         "STOP_LATEST_SEC": "30",
         "LOG_LEVEL": "INFO",
-        "MIN_LOSS_PROFIT_RATIO": "10",
+        "MIN_PROFIT_TO_LOSS_RATIO": "0.1",
     }
 
 

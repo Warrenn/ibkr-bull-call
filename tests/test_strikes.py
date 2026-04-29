@@ -129,115 +129,32 @@ def test_non_uniform_widths_handled() -> None:
     assert spread.long_strike == 5000.0
 
 
-def test_min_loss_profit_ratio_narrows_to_deep_itm_only() -> None:
-    """With min L:P = 10:1, only spreads where debit >= 10W/11 qualify.
+def test_selection_does_not_consider_profit_to_loss_ratio() -> None:
+    """Regression: the profit-to-loss ratio is enforced at the limit-order
+    level, not at strike selection. Selection picks the widest spread under
+    the dollar/POP caps regardless of payoff ratio."""
 
-    For a $5-wide pair, debit must be >= $4.55 (deep ITM).
-    """
-
+    # This chain has spreads with very low max_profit/max_loss ratios.
+    # With a $10,000 loss cap and POP=0.50, selection should still find
+    # a viable spread — the ratio is no longer a rejection criterion here.
     c = chain(
-        (4990.0, 10.00, 11.00),  # deep ITM
-        (4995.0, 5.00, 6.00),
-        (5000.0, 2.00, 3.00),
-        (5005.0, 0.50, 1.00),
-        (5010.0, 0.10, 0.30),
-    )
-    # Long becomes 4995 (algo result). Short candidates from 5000 up:
-    # K'=5000: nd = 6 - 2 = 4.00, width=5 -> profit=1, ratio = 4 -> NOT >= 10
-    # K'=5005: nd = 6 - 0.5 = 5.5, width=10 -> profit=4.5, ratio = 1.22 -> NOT >= 10
-    # No short qualifies => None.
-    pop = fixed_pop({4999.0: 0.99, 5000.5: 0.99, 5000.9: 0.99})
-    spread = select_spread(
-        c, max_loss_usd=10_000.0, pop_fn=pop, pop_threshold=0.50,
-        min_loss_profit_ratio=10.0,
-    )
-    assert spread is None
-
-
-def test_min_loss_profit_ratio_with_deep_itm_long_yields_a_trade() -> None:
-    """A chain where the long is very deep ITM gives debit close to width,
-    so the L:P ratio can clear 10:1."""
-
-    c = chain(
-        (4980.0, 19.00, 20.00),  # very deep ITM
         (4985.0, 14.00, 15.00),
-        (4990.0, 9.50, 10.50),
-        (4995.0, 5.50, 6.00),
-        (5000.0, 0.40, 0.60),
-    )
-    # Walk down for long:
-    # gap(4995)=ask(4995)-bid(5000)=6-0.40=5.60 NOT < 5 -> stop
-    # gap(4990)=ask(4990)-bid(4995)=10.50-5.50=5.0 NOT < 5 -> stop
-    # gap(4985)=ask(4985)-bid(4990)=15-9.50=5.50 NOT < 5 -> stop
-    # gap(4980)=ask(4980)-bid(4985)=20-14=6.0 NOT < 5 -> stop, no candidate
-    # Need slightly different numbers — let's use fmw - tighter.
-    c2 = chain(
-        (4980.0, 18.00, 19.00),
-        (4985.0, 14.00, 15.00),  # gap with 4980: 19 - 14 = 5 -> NOT <5
-        (4990.0, 10.00, 11.00),  # gap with 4985: 15 - 10 = 5 -> NOT <5
-        (4995.0, 6.00, 7.00),    # gap with 4990: 11 - 6 = 5 -> NOT <5
-        (5000.0, 2.50, 3.00),    # gap with 4995: 7 - 2.5 = 4.5 < 5 ✓ candidate
-    )
-    # gap(4995) ✓ -> candidate=4995. Then gap(4990): 11-6=5, fail. long=4995.
-    # Short ascending from 5000:
-    # K'=5000: nd = 7 - 2.5 = 4.5, width=5, profit=0.5, ratio=9 (< 10) -> fails ratio
-    # No qualifying short -> None.
-    pop = fixed_pop({4999.5: 0.99})
-    assert select_spread(
-        c2, max_loss_usd=10_000.0, pop_fn=pop, pop_threshold=0.50,
-        min_loss_profit_ratio=10.0,
-    ) is None
-
-
-def test_min_loss_profit_ratio_none_means_no_constraint() -> None:
-    """Default behaviour (no min ratio) is unchanged."""
-
-    c = chain(
-        (4995.0, 5.00, 6.00),
-        (5000.0, 2.00, 3.00),
-        (5005.0, 0.50, 1.00),
-        (5010.0, 0.10, 0.30),
-    )
-    pop = fixed_pop({4999.0: 0.99, 5000.5: 0.99, 5000.9: 0.99})
-    s_with = select_spread(
-        c, max_loss_usd=10_000.0, pop_fn=pop, pop_threshold=0.50,
-        min_loss_profit_ratio=None,
-    )
-    s_without = select_spread(
-        c, max_loss_usd=10_000.0, pop_fn=pop, pop_threshold=0.50,
-    )
-    assert s_with == s_without
-    assert s_with is not None
-
-
-def test_min_loss_profit_ratio_clears_when_debit_close_to_width() -> None:
-    """A $5-wide spread with debit $4.60 has ratio 11.5:1, qualifies for 10:1."""
-
-    # Build a chain where long ITM is priced such that debit hits ~4.60 for $5 width.
-    # long=4990, short=4995, want debit = ask(4990) - bid(4995) = 4.60
-    # ask(4990) = 9.60, bid(4995) = 5.00 -> debit 4.60
-    c = chain(
-        (4985.0, 14.00, 15.00),  # gap with 4990: 9.60-?
-        (4990.0, 9.00, 9.60),    # gap(4985)=15-9=6 -> NOT <5; stop. long candidate not yet set here.
+        (4990.0, 9.00, 9.60),
         (4995.0, 5.00, 5.50),
         (5000.0, 1.00, 1.50),
     )
-    # Walk down: gap(4995)=ask(4995)-bid(5000)=5.50-1.00=4.50 <5 ✓ candidate=4995
-    # gap(4990)=ask(4990)-bid(4995)=9.60-5.00=4.60 <5 ✓ candidate=4990
-    # gap(4985)=ask(4985)-bid(4990)=15.00-9.00=6.00 NOT <5 -> stop. long=4990.
-    # Short ascending from 4995:
-    # K'=4995: nd=ask(4990)-bid(4995)=9.60-5.00=4.60, width=5, profit=0.40, ratio=11.5 (>=10) ✓
-    # K'=5000: nd=9.60-1.00=8.60, width=10, profit=1.40, ratio=6.14 (<10) -> fail
-    # short=4995, debit=4.60.
     pop = fixed_pop({4994.6: 0.99, 4998.6: 0.99})
     spread = select_spread(
         c, max_loss_usd=10_000.0, pop_fn=pop, pop_threshold=0.50,
-        min_loss_profit_ratio=10.0,
     )
+    # Selection gets a spread despite poor max_profit/max_loss — the ratio
+    # check happens later at limit-order time.
     assert spread is not None
-    assert spread.long_strike == 4990.0
-    assert spread.short_strike == 4995.0
-    assert spread.debit == pytest.approx(4.60)
+    width = spread.short_strike - spread.long_strike
+    realized_ratio = (width - spread.debit) / spread.debit
+    # Sanity: the spread chosen has a low profit-to-loss ratio; that's fine
+    # at the selection layer because the ratio enforcement is downstream.
+    assert realized_ratio >= 0  # only structural rejection (no guaranteed loss)
 
 
 def test_boundary_gap_equals_width_is_invalid() -> None:

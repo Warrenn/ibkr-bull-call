@@ -67,7 +67,6 @@ def propose_trade(
         max_loss_usd=settings.max_loss_usd,
         pop_fn=pop_fn,
         pop_threshold=settings.pop_threshold,
-        min_loss_profit_ratio=settings.min_loss_profit_ratio,
     )
 
 

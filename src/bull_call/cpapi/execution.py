@@ -46,6 +46,58 @@ def _round_tick(price: float, tick: float = 0.05) -> float:
     return round(round(price / tick) * tick, 2)
 
 
+# Smallest profit per share we'll tolerate after a reprice up. One tick of
+# profit means max_profit = $5 per contract — enough to keep the spread on
+# the right side of zero even after rounding.
+_MIN_PROFIT_PER_SHARE = 0.05
+
+
+def _ratio_debit_ceiling(
+    width: float, min_profit_to_loss_ratio: float | None,
+) -> float:
+    """Highest debit per share that still satisfies the user's profit floor.
+
+    From  max_profit / max_loss >= r  with max_loss = D, max_profit = W - D:
+        (W - D) / D >= r   <=>   D <= W / (1 + r)
+    Returns +inf when the ratio is unset (no constraint).
+    """
+
+    if min_profit_to_loss_ratio is None or min_profit_to_loss_ratio <= 0:
+        return float("inf")
+    return width / (1.0 + min_profit_to_loss_ratio)
+
+
+def _safe_debit_max(
+    requested: float,
+    *,
+    long_strike: float,
+    short_strike: float,
+    min_profit_to_loss_ratio: float | None = None,
+) -> float:
+    """Clamp the reprice ceiling so a fill never violates two invariants:
+
+    1. ``max_profit > 0``: a fill above ``width`` would be a guaranteed loss.
+    2. ``max_profit / max_loss >= min_profit_to_loss_ratio`` (if set): a fill
+       above ``width / (1 + r)`` would deliver less profit per unit risk than
+       the user demanded.
+
+    The smaller of the two ceilings wins.
+    """
+
+    width = short_strike - long_strike
+    width_ceiling = max(0.0, width - _MIN_PROFIT_PER_SHARE)
+    ratio_ceiling = _ratio_debit_ceiling(width, min_profit_to_loss_ratio)
+    ceiling = min(width_ceiling, ratio_ceiling)
+    if requested > ceiling:
+        log.warning(
+            "reprice cap %.2f exceeds safe ceiling %.2f "
+            "(width=%.2f, min_profit_to_loss=%s); clamping",
+            requested, ceiling, width, min_profit_to_loss_ratio,
+        )
+        return ceiling
+    return requested
+
+
 def submit_entry_lmt(
     client: IbkrClient,
     *,
@@ -54,15 +106,47 @@ def submit_entry_lmt(
     short_leg: OptionContract,
     debit_mid: float,
     debit_max: float,
-    timeout_s: float = 20.0,
+    min_profit_to_loss_ratio: float | None = None,
+    timeout_s: float = 300.0,
     reprice_step: float = 0.05,
 ) -> FillReport:
     """Submit a BUY combo LMT at midpoint debit; reprice once toward debit_max
     if unfilled; cancel and report unfilled if still no go.
+
+    ``timeout_s`` is the *total* budget; we split it 50/50 across the
+    initial-price phase and the post-reprice phase, so by default the order
+    sits at the original limit for 2.5 min, then bumps one tick and waits
+    another 2.5 min.
+
+    The reprice ceiling is clamped so a fill never violates the configured
+    ``min_profit_to_loss_ratio`` (no surprise ratio degradation on a reprice).
     """
 
+    phase_timeout = max(1.0, timeout_s / 2.0)
+
     conidex = _conidex(long_leg, short_leg)
-    initial_price = _round_tick(debit_mid)
+    # Cap BOTH the initial limit and the reprice ceiling at the ratio floor:
+    # we never offer a price that would deliver less profit margin than the
+    # user demanded, even if the chain's midpoint is above that ceiling.
+    capped_mid = _safe_debit_max(
+        debit_mid,
+        long_strike=long_leg.strike,
+        short_strike=short_leg.strike,
+        min_profit_to_loss_ratio=min_profit_to_loss_ratio,
+    )
+    initial_price = _round_tick(capped_mid)
+    if capped_mid < debit_mid:
+        log.warning(
+            "midpoint debit %.2f exceeds ratio ceiling; submitting at %.2f "
+            "(fill unlikely unless market moves in)",
+            debit_mid, initial_price,
+        )
+    safe_debit_max = _safe_debit_max(
+        debit_max,
+        long_strike=long_leg.strike,
+        short_strike=short_leg.strike,
+        min_profit_to_loss_ratio=min_profit_to_loss_ratio,
+    )
 
     order = OrderRequest(
         conid=None,
@@ -79,11 +163,11 @@ def submit_entry_lmt(
     place_resp = client.place_order(order_request=order, answers=_DEFAULT_ANSWERS, account_id=account_id)
     order_id = _extract_order_id(place_resp.data)
 
-    fill = _await_fill(client, order_id, timeout_s)
+    fill = _await_fill(client, order_id, phase_timeout)
     if fill is not None:
         return FillReport(filled=True, avg_fill_price=fill, order_id=order_id)
 
-    new_price = min(debit_max, _round_tick(initial_price + reprice_step))
+    new_price = min(safe_debit_max, _round_tick(initial_price + reprice_step))
     if new_price > initial_price and order_id is not None:
         log.info("entry LMT repricing to %.2f", new_price)
         client.modify_order(
@@ -95,7 +179,7 @@ def submit_entry_lmt(
             answers=_DEFAULT_ANSWERS,
             account_id=account_id,
         )
-        fill = _await_fill(client, order_id, timeout_s)
+        fill = _await_fill(client, order_id, phase_timeout)
         if fill is not None:
             return FillReport(filled=True, avg_fill_price=fill, order_id=order_id)
 
@@ -132,7 +216,7 @@ def submit_close_market(
     place_resp = client.place_order(order_request=order, answers=_DEFAULT_ANSWERS, account_id=account_id)
     order_id = _extract_order_id(place_resp.data)
 
-    fill = _await_fill(client, order_id, timeout_s)
+    fill = _await_fill(client, order_id, phase_timeout)
     if fill is not None:
         return FillReport(filled=True, avg_fill_price=fill, order_id=order_id)
     log.error("close MKT did not fill within %ds; order left working", timeout_s)

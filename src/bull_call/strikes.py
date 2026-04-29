@@ -64,9 +64,19 @@ def _find_short_index(
     max_loss_usd: float,
     pop_fn: Callable[[float], float],
     pop_threshold: float,
-    min_loss_profit_ratio: float | None,
 ) -> tuple[int, float, float] | None:
-    """Return (index, net_debit, pop) for the chosen short, or None if none valid."""
+    """Return (index, net_debit, pop) for the chosen short, or None if none valid.
+
+    Selection constraints (all must hold):
+      - net_debit * 100 <= max_loss_usd
+      - pop >= pop_threshold
+      - max_profit > 0 (no guaranteed loss)
+
+    The profit-to-loss ratio is **not** a selection constraint — it's
+    enforced at the limit-order level (see ``cpapi.execution._safe_debit_max``).
+    Selection picks the widest viable spread under the dollar/POP caps; the
+    order layer caps the price you'll actually pay.
+    """
 
     long = chain[long_idx]
     candidate: tuple[int, float, float] | None = None
@@ -78,16 +88,8 @@ def _find_short_index(
         pop = pop_fn(breakeven)
         debit_ok = net_debit * 100.0 <= max_loss_usd
         pop_ok = pop >= pop_threshold
-        # Ratio of max-loss to max-profit. For a debit spread,
-        # max_loss = net_debit, max_profit = width - net_debit.
-        # If max_profit <= 0 the spread is structurally broken; treat as failing.
-        if max_profit_per_share <= 0:
-            ratio_ok = False
-        elif min_loss_profit_ratio is None:
-            ratio_ok = True
-        else:
-            ratio_ok = (net_debit / max_profit_per_share) >= min_loss_profit_ratio
-        if debit_ok and pop_ok and ratio_ok:
+        viable = max_profit_per_share > 0
+        if debit_ok and pop_ok and viable:
             candidate = (j, net_debit, pop)
         else:
             break
@@ -100,15 +102,12 @@ def select_spread(
     max_loss_usd: float,
     pop_fn: Callable[[float], float],
     pop_threshold: float = 0.70,
-    min_loss_profit_ratio: float | None = None,
 ) -> Spread | None:
     """Choose the bull call spread per the descending-then-ascending algorithm.
 
     ``chain`` must be sorted ascending by strike.
 
-    If ``min_loss_profit_ratio`` is set, only spreads where
-    ``max_loss / max_profit >= min_loss_profit_ratio`` are considered viable.
-    For a $5-wide debit spread a 10:1 ratio requires debit >= $4.55 (deep ITM).
+    The profit-to-loss ratio is enforced at the limit-order level, not here.
     """
 
     if len(chain) < 2:
@@ -124,7 +123,6 @@ def select_spread(
         max_loss_usd=max_loss_usd,
         pop_fn=pop_fn,
         pop_threshold=pop_threshold,
-        min_loss_profit_ratio=min_loss_profit_ratio,
     )
     if short is None:
         return None
