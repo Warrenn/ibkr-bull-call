@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancel in-flight runs on the same ref when a new push lands. Saves CI
+# minutes when iterating quickly on a PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: pytest + mypy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Install Python + dev deps
+        run: uv sync --extra dev
+
+      - name: Run test suite
+        run: uv run pytest -q
+
+      - name: Type-check (mypy)
+        # boto3 / ibind have no upstream stubs, so mypy will report
+        # missing-imports for those — known and accepted. Treat any
+        # other error as a CI failure.
+        run: |
+          uv run mypy src 2>&1 | tee mypy.out
+          # Allowed: missing-import errors for boto3 / ibind / botocore.
+          # Anything else fails the job.
+          if grep -E "^src/.*error:" mypy.out \
+              | grep -v "missing library stubs or py.typed marker" \
+              | grep -v "^Found .* errors? in"; then
+            echo "::error::mypy reported errors beyond known missing-stubs warnings"
+            exit 1
+          fi
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck infra/scripts/
+        # Ubuntu runners ship shellcheck preinstalled.
+        run: shellcheck infra/scripts/*.sh
+
+  cfn-lint:
+    name: cfn-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install cfn-lint
+        run: pip install cfn-lint
+      - name: Lint CloudFormation templates
+        run: cfn-lint infra/cloudformation/*.yaml
