@@ -42,25 +42,40 @@
     },
     {
       "name": "es_or_mes_intraday",
-      "status": "required",
-      "source": "TBD",
-      "vendor": "TBD",
-      "license": "TBD",
-      "acquired_at": "TBD",
+      "status": "populated",
+      "source": "GLBX.MDP3 OHLCV-1m via Databento",
+      "vendor": "Databento",
+      "license": "Databento Standard self-serve (single-seat, research, no redistribution)",
+      "acquired_at": "2026-04-30",
       "path": "research/data/dataset-v1/es_intraday.parquet",
-      "symbol": "ES_or_MES",
-      "resolution": "1m minimum; 1s preferred later",
+      "generator": "research/scripts/download_databento.py",
+      "symbol": "ES.c.0 (continuous front-month)",
+      "stype_in": "continuous",
+      "resolution": "1-minute OHLCV",
       "date_range": {
-        "start": "TBD",
-        "end": "TBD"
+        "start": "2023-04-30",
+        "end": "2026-04-30"
       },
-      "checksum": "TBD",
+      "row_count": 1053199,
+      "cost_usd": 3.85,
+      "checksum": "sha256:cf4567cd3303f7f45f70baa9d862715913c23852fb7ece220234c4d694cfc869",
       "schema": [
-        "ts_utc",
-        "symbol",
-        "price"
+        "ts_event",
+        "rtype",
+        "publisher_id",
+        "instrument_id",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "symbol"
       ],
-      "known_limitations": []
+      "known_limitations": [
+        "Databento flagged 3+ days as 'degraded' quality at acquisition: 2025-09-17, 2025-09-24, 2025-11-28 (warning truncated; query metadata.get_dataset_condition for the full list).",
+        "Continuous front-month is calendar-roll (`c` rank 0); roll boundaries introduce small gaps in price level not present in single-contract series.",
+        "1-minute OHLCV is bar-of-trades, not bar-of-quotes; for mid-price use, reconstruct from MBP-1 / CMBP-1 instead."
+      ]
     },
     {
       "name": "spx_0dte_call_chain",
