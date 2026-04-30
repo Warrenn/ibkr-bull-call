@@ -1,0 +1,169 @@
+spec_id: strategy-spec-v8-vol-carry
+strategy_spec_id: v8
+phase: phase_1_initial_test
+status: frozen_for_initial_test
+parent_spec: roadmap_queued (no prior v8 implementation)
+parent_result: null
+
+question: >
+  Does a contango/backwardation-gated short-vol position on the
+  VIX futures curve produce positive risk-adjusted return over a
+  60-month window, AFTER accounting for tail-risk
+  (Volmageddon-style) exposure?
+
+theoretical_basis: >
+  VIX futures roll yield (contango): when spot VIX < VIX3M,
+  longer-dated VIX futures are priced higher than spot and decay
+  toward spot as expiry approaches. A short position in
+  short-term VIX futures (or equivalently long an inverse-vol ETF
+  like SVXY at -0.5x leverage post-2018) harvests this roll.
+  Empirical literature (Whaley 2013, Eraker 2014, Augustin et al.
+  2019) reports Sharpe 1.0-2.0 in calm regimes BUT
+  catastrophic blowups exist (Feb 5 2018 "Volmageddon": XIV down
+  96% intraday, terminated by sponsor).
+
+dataset:
+  version: dataset-v1
+  required_inputs:
+    - vol_etps_daily   # VXX, SVXY daily Close (yfinance)
+    - vix_indices_daily  # VIX, VIX3M daily Close (yfinance)
+                          # available 2018-01-01 onward (post-XIV-death era)
+                          # SVXY moved to -0.5x leverage on 2018-02-28
+
+universe:
+  description: Short-vol expression via SVXY (-0.5x leverage)
+  primary_instrument: SVXY  # ProShares Short VIX Short-Term Futures ETF
+  signal_indices:
+    - "^VIX"     # spot VIX
+    - "^VIX3M"   # VIX 3-month
+  benchmark: SPY
+
+signal:
+  type: term_structure_contango_gate
+  ratio: vix_to_vix3m   # VIX / VIX3M
+  contango_threshold: 0.93   # ratio < 0.93 → strong contango → long SVXY
+  backwardation_threshold: 1.00  # ratio >= 1.00 → backwardation → flat
+  rationale: >
+    The 0.93 contango threshold avoids whipsaw at the boundary
+    where roll yield is small (~7% annualized) and trade costs
+    can erase it. Above 1.00 (backwardation) is the classic stress
+    regime where short-vol positions catastrophically blow up;
+    standing aside is the disciplined response. Between 0.93 and
+    1.00 is a "gray zone" — flat is the conservative choice.
+  computation: prior-day close VIX and VIX3M
+
+portfolio_construction:
+  weighting: full_allocation_when_active
+  position_size: 100% of strategy NAV when long SVXY
+  rebalance_frequency: daily
+  entry_evaluation_time: prior_day_close
+  trade_execution_time: next_day_open  # use today's close as proxy in sim
+  rationale: >
+    Daily evaluation ensures we react quickly to regime flips
+    (contango → backwardation can happen overnight). Full allocation
+    when active reflects the strategy's "all-in or out" character —
+    half-positioning a known-tail-risk trade gives up edge without
+    proportionally reducing tail.
+
+risk_management:
+  max_position_size: 100%
+  hard_stop_daily_loss_pct: -10%   # if SVXY drops > 10% in a day, exit at close
+  hard_stop_cumulative_dd_pct: -25% # cumulative DD from peak NAV → strategy halt
+  monthly_max_loss_pct: -15%       # per-month NAV loss → suspend until next month
+  no_leverage: true
+  no_shorting: true  # use SVXY long, NOT short VXX (capped loss)
+  no_options: true
+  rationale: >
+    SVXY post-2018 is -0.5x leveraged, so single-day max loss is
+    bounded at 50% even in catastrophic scenarios. Hard stop at -10%
+    daily loss + -25% cumulative DD provides Volmageddon-class
+    protection. Monthly cap is a softer guard against slow bleeds.
+
+execution:
+  market_orders_at_open: true
+  commissions_assumed: 0  # IBKR retail commission-free on ETPs
+  slippage_assumed: 0.001  # 10 bps per round-trip (SVXY less liquid than SPY)
+
+split_policy:
+  train_fraction: 0.6
+  validation_fraction: 0.2
+  holdout_fraction: 0.2
+  basis: >
+    Compute on daily returns over the dataset-v1 60mo window
+    (2021-04-30 to 2026-04-30). Split by trading day count
+    chronologically. Approximately 752 trading days → 451 train,
+    150 val, 151 holdout.
+
+decision_rules:
+  train_continue_if:
+    - train_total_return > 0
+    - train_sharpe_annualized >= 0.8
+    - train_max_dd_pct >= -25%
+    - train_max_single_day_loss_pct >= -15%
+
+  train_kill_if:
+    - train_total_return < 0
+    - train_sharpe_annualized < 0
+    - train_max_dd_pct < -40%
+    - train_max_single_day_loss_pct < -25%
+
+  validation_continue_if:
+    - validation_total_return > 0
+    - validation_sharpe_annualized > 0.5
+    - validation_max_dd_pct > -30%
+
+  holdout_continue_if:
+    - holdout_total_return > 0
+    - holdout_sharpe_annualized > 0.3
+    - holdout_outperforms_spy_or_within_5pct_after_costs
+
+  always_kill_if:
+    - cumulative_max_dd_pct < -40%   # stricter than v9 due to tail risk
+    - max_single_day_loss_pct < -25% # Volmageddon-class event
+
+outputs:
+  full_report: research/reports/v8-vol-carry-full.md
+  full_ledger: research/reports/v8-vol-carry-full-ledger.csv
+
+caveats:
+  - >
+    SVXY's leverage was -1.0× pre-2018-02-28 then permanently changed
+    to -0.5× after Volmageddon. yfinance auto-adjusted close folds
+    in this rebase implicitly; our window starts 2021-04-30 so we
+    are entirely in -0.5× territory.
+  - >
+    The Volmageddon event (2018-02-05) is OUTSIDE our window. We
+    cannot empirically test the strategy's Volmageddon response on
+    the in-sample data. Tail-risk inference is theoretical only.
+  - >
+    Daily-close pricing is a simplification. Real trading would
+    execute at next-day open, which can gap on stress events. Our
+    sim uses prior-day signal → today's close return; gap risk is
+    embedded in the daily return.
+  - >
+    VIX3M ticker symbol on yfinance is "^VIX3M" (Cboe S&P 500
+    3-Month Volatility Index). If unavailable, fallback to VXV
+    (legacy ticker) or compute from VIX futures front-3M.
+  - >
+    No transaction costs beyond the 10 bps slippage assumption.
+    Entry/exit per regime change is reasonable (probably 5-15
+    flips per year).
+  - >
+    Strategy is correlated with risk-on equity: contango regimes
+    coincide with rallying SPX. Combining v8 with v9 (also
+    SPY-correlated) does NOT give full diversification benefit;
+    expect 0.4-0.6 correlation between strategy returns.
+
+notes:
+  - >
+    First non-equity strategy in the project. If this works, opens
+    a different operational path (vol products, regime gates).
+  - >
+    v8 is intentionally simple. More sophisticated variants
+    (signal smoothing, partial allocation, term-structure roll-yield
+    estimation) are deferred to v8a/v8b/etc. only after v8 baseline
+    is shown to work.
+  - >
+    Spec is frozen at the start of testing. Any parameter change
+    requires creating v8a (and treating prior holdout conclusions
+    as non-transferable).

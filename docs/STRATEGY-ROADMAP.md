@@ -41,21 +41,37 @@ to the next. Don't sprawl.
   on a vol-premium-aligned structure. Cheapest. Highest fit with
   what we've built.
 
-### v8 — Volatility Term Structure Carry (VXX / SVXY)
+### v8 — Volatility Term Structure Carry (SVXY)
 
-- **Status**: QUEUED
-- **Mechanic**: When VIX futures curve is in contango (VIX < VIX3M),
-  short VXX (or long SVXY); when in backwardation (stress regime,
-  VIX > VIX3M), reverse or stand aside. Hold for days-to-weeks.
-- **Theoretical basis**: VIX futures contango is a structural
-  property — long-dated futures roll down toward spot. Best-
-  documented "vol carry" trade in literature (Whaley, Eraker, etc.).
-- **Data**: yfinance free for VXX, SVXY, VIX, VIX3M, VIX9D. No
-  spend.
-- **Test cost**: free, ~2 hours new backtest framework.
-- **Deploy cost**: simple (1 ETF position, rebalance daily/weekly).
-- **Caveat**: 2018 "Volmageddon" wiped out XIV in one day; tail risk
-  is real. Position sizing + circuit breaker required.
+- **Status**: KILLED — train_continue_if failure (2026-04-30, this PR)
+- **Mechanic**: long SVXY (-0.5× short-vol ETF) when VIX/VIX3M < 0.93
+  (strong contango); flat otherwise. Daily rebalance. Frozen as
+  `research/specs/strategy-spec-v8-vol-carry.yaml`.
+- **Test result (60mo, 2021-04 → 2026-04, 1256 trading days)**:
+  - Total return: **-10.54%**, CAGR -2.21%, Sharpe +0.03
+  - Max DD: -47.67% (exceeds -40% always-kill threshold)
+  - Loses to SPY by -15.29% CAGR
+  - Train slice killed: Sharpe 0.41 < 0.8 floor + max DD -32% < -25% floor
+  - Validation slice was -36.25% return (Sharpe -1.87) — would have
+    killed there too if train had passed
+  - Holdout slice was actually +13.27% (recovery year) — irrelevant
+    once train fails
+- **Why it failed**: regime flipping is too late. By the time
+  VIX/VIX3M crosses 0.93, the vol spike has already happened; we
+  exit at the bottom and miss the recovery. 122 flips over 5 years
+  also burned slippage. Literature Sharpe of 1-2 is from pre-2018
+  windows; the post-2021 vol regime appears structurally different.
+- **Theoretical basis**: VIX futures contango is structural; the
+  literature carry premium is real but not extractable with this
+  threshold-based gate in our window.
+- **Data**: `research/data/dataset-v1/vol_etps_daily.parquet`
+  (yfinance, sha256:f37e1cd9..., free).
+- **Test cost**: free.
+- **Deploy cost**: would have been simple, but moot.
+- **What would NOT be a fix**: tweaking the 0.93 threshold, smoothing
+  the signal, or adding a sub-strategy is moving the goalposts.
+  Per spec: any parameter change creates v8a, with prior holdout
+  treated as consumed.
 
 ### v9 — Sector ETF Momentum (monthly rebalance)
 
@@ -120,22 +136,32 @@ to the next. Don't sprawl.
 
 1. ~~**v7** — short iron condor on SPX 0DTE~~ → KILLED-BY-DIAGNOSTIC (PR #69)
 2. ~~**v9** — sector ETF momentum~~ → **PROMOTED** (paper-trading candidate)
-3. **v8** (NEXT) — vol term structure carry
-4. **v11** — calendar spreads
+3. ~~**v8** — vol term structure carry~~ → KILLED (this PR)
+4. **v11** (NEXT) — calendar spreads
 5. **v10** — pairs trading
 
-v9 is the first strategy in the project to survive the falsification
-framework. It is now a paper-trading candidate — NOT a live-capital
-deployment. See v9 caveats above; regime sensitivity is a real concern.
+After v7-v9 evaluations: v9 is the only surviving candidate. v8's
+literature-based carry premium did not materialize in our window
+(post-2021 vol regime is structurally different from the pre-2018
+windows the literature studied).
 
-Two paths forward (the user can run them in parallel or sequentially):
+**Combined v8+v9 portfolio analysis** (also in this PR): with v8's
+return negative and v8/v9 correlation of +0.39, holding both is
+**strictly worse** than holding v9 alone — combined Sharpe 0.37 vs
+v9 alone 0.76. Naïve 50/50 weighting is rejected. Combining a killed
+strategy with a promoted one dilutes the survivor's edge.
 
-- **Path A — paper-trade v9** while continuing strategy research.
-  Monthly rebalance is low-burden; can be run on the existing project
-  infrastructure with minor adaptation away from the SPX 0DTE bot.
-- **Path B — proceed to v8** in parallel. Each strategy gets a fair
-  shot under the same shape → validate → holdout framework. Move to
-  the next only after the prior is KILLED or PROMOTED.
+Three paths forward:
+
+- **Path A — paper-trade v9 only** while continuing strategy research.
+  Monthly rebalance is low-burden.
+- **Path B — proceed to v11 (calendar spreads)** per roadmap order.
+  v11 is the next theoretically-different premium source (vol term
+  structure via options rather than ETPs).
+- **Path C — pause and reflect**: 4 of 5 candidates have been killed;
+  the one promotion is conditional. Consider whether the falsification
+  framework is too strict, or whether the 60mo window's regime is
+  unfavorable to most factor strategies.
 
 ## Lessons carried forward
 
