@@ -277,13 +277,17 @@ def _opt_row(conid: int, *, bid: str = "5.00", ask: str = "5.20",
 
 def _make_fake_client(
     *,
-    underlying_match: list[dict] | None = None,
-    spot_row_override: dict | None = None,
+    underlying_match: list[dict[str, Any]] | None = None,
+    spot_row_override: dict[str, Any] | None = None,
     call_strikes: list[float] | None = None,
-    secdef_info_per_strike: dict[float, list[dict]] | None = None,
-    option_rows: list[dict] | None = None,
-):  # type: ignore[no-untyped-def]
+    secdef_info_per_strike: dict[float, list[dict[str, Any]]] | None = None,
+    option_rows: list[dict[str, Any]] | None = None,
+) -> Any:
     """Build a duck-typed IbkrClient with scripted method responses.
+
+    Returns ``Any`` because we can't import the real ``IbkrClient`` here
+    without a transitive ibind dependency, and the orchestrator under
+    test only cares about the duck-typed surface.
 
     Defaults form a happy-path setup with one viable strike (4995 →
     short-target 5005) on a single underlying (SPX).
@@ -500,24 +504,10 @@ def test_fetch_chain_returns_none_when_no_iv_anywhere() -> None:
     ) is None
 
 
-def test_fetch_chain_uses_IND_sectype_for_index_symbols() -> None:
-    """SPX should be queried as IND, not STK — different IBKR API paths."""
-
-    captured: dict[str, str] = {}
-
-    class FakeClient:
-        def search_contract_by_symbol(self, *, symbol: str, sec_type: str) -> _Resp:
-            captured["sec_type"] = sec_type
-            return _Resp([])  # empty triggers the early None return
-
-    cpapi_chain.fetch_0dte_call_chain(
-        FakeClient(), symbol="SPX", today_et=_TODAY,  # type: ignore[arg-type]
-    )
-    assert captured["sec_type"] == "IND"
-
-
-def test_fetch_chain_uses_STK_sectype_for_non_index_symbols() -> None:
-    """A non-index ticker (e.g. AAPL) should be queried as STK."""
+def _make_sectype_capturing_client() -> tuple[Any, dict[str, str]]:
+    """Tiny fake that records the ``sec_type`` arg of the first
+    ``search_contract_by_symbol`` call and returns an empty match list
+    (so the orchestrator bails early — we only care about the arg)."""
 
     captured: dict[str, str] = {}
 
@@ -526,7 +516,30 @@ def test_fetch_chain_uses_STK_sectype_for_non_index_symbols() -> None:
             captured["sec_type"] = sec_type
             return _Resp([])
 
+    return FakeClient(), captured
+
+
+@pytest.mark.parametrize(
+    "symbol,expected_sec_type",
+    [
+        ("SPX", "IND"),
+        ("VIX", "IND"),
+        ("NDX", "IND"),
+        ("RUT", "IND"),
+        ("XSP", "IND"),
+        ("AAPL", "STK"),
+        ("MSFT", "STK"),
+    ],
+)
+def test_fetch_chain_uses_correct_sectype_per_symbol(
+    symbol: str, expected_sec_type: str,
+) -> None:
+    """Indices need ``sec_type='IND'``, equities need ``'STK'`` — different
+    IBKR API paths. Parametrized so adding a new index ticker to the
+    list in ``fetch_0dte_call_chain`` is automatically test-covered."""
+
+    client, captured = _make_sectype_capturing_client()
     cpapi_chain.fetch_0dte_call_chain(
-        FakeClient(), symbol="AAPL", today_et=_TODAY,  # type: ignore[arg-type]
+        client, symbol=symbol, today_et=_TODAY,
     )
-    assert captured["sec_type"] == "STK"
+    assert captured["sec_type"] == expected_sec_type
