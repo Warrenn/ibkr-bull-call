@@ -30,7 +30,14 @@ def _ignore_unknown_tag(loader: yaml.Loader, tag_suffix: str, node: yaml.Node) -
         return loader.construct_sequence(node)
     if isinstance(node, yaml.MappingNode):
         return loader.construct_mapping(node)
-    return None
+    # Fail fast rather than silently substituting None — a yaml node we
+    # don't recognise means the CFN intrinsic-function shape changed (or
+    # the loader is broken) and a downstream test would just see KeyError
+    # / TypeError without telling us why.
+    raise TypeError(
+        f"unexpected YAML node type for CFN intrinsic !{tag_suffix}: "
+        f"{type(node).__name__}"
+    )
 
 
 _CfnLoader.add_multi_constructor("!", _ignore_unknown_tag)
@@ -38,7 +45,19 @@ _CfnLoader.add_multi_constructor("!", _ignore_unknown_tag)
 
 def _load(name: str) -> dict[str, Any]:
     text = (_INFRA / name).read_text()
-    return yaml.load(text, Loader=_CfnLoader)
+    template = yaml.load(text, Loader=_CfnLoader)
+    if not isinstance(template, dict):
+        raise AssertionError(
+            f"{name} did not parse to a mapping at the top level "
+            f"(got {type(template).__name__}); the file is structurally "
+            "broken or not a CFN template."
+        )
+    if "Resources" not in template:
+        raise AssertionError(
+            f"{name} has no top-level `Resources` key; CFN templates must "
+            "declare resources here. Did the file get renamed or rewritten?"
+        )
+    return template
 
 
 @pytest.mark.parametrize(
