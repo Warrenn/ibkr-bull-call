@@ -92,18 +92,22 @@
     },
     {
       "name": "trading_calendar",
-      "status": "required",
-      "source": "TBD",
-      "vendor": "TBD",
-      "license": "TBD",
-      "acquired_at": "TBD",
+      "status": "populated",
+      "source": "NYSE schedule via pandas_market_calendars",
+      "vendor": "pandas-market-calendars (open-source, MIT)",
+      "license": "MIT",
+      "acquired_at": "2026-04-30",
       "path": "research/data/dataset-v1/trading_calendar.parquet",
+      "generator": "research/scripts/generate_trading_calendar.py",
       "resolution": "daily",
       "date_range": {
-        "start": "TBD",
-        "end": "TBD"
+        "start": "2022-01-01",
+        "end": "2026-04-30"
       },
-      "checksum": "TBD",
+      "row_count": 1581,
+      "trading_day_count": 1085,
+      "half_day_count": 9,
+      "checksum": "sha256:486488b909f157cdced49817b9fa6ae93a15c16f5bab9087e3e89a4ced00651d",
       "schema": [
         "date",
         "is_trading_day",
@@ -112,7 +116,8 @@
         "session_close_utc"
       ],
       "known_limitations": [
-        "Add event tags later when testing regime and event filters."
+        "Add event tags later when testing regime and event filters.",
+        "Half-day detection compares NYSE close to 16:00 ET (anything earlier flagged is_half_day=true). Matches bull_call.calendar.session_times semantics."
       ]
     }
   ],
