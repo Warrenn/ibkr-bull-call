@@ -35,6 +35,7 @@ def _settings(**overrides: Any) -> Settings:
         heartbeat_interval_sec=300,
         session_error_backoff_sec=300,
         session_error_max_consecutive=5,
+        skip_half_days=True,
     )
     base.update(overrides)
     return Settings(**base)

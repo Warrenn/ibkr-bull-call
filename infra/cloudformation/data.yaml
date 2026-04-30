@@ -36,7 +36,8 @@ Parameters:
         "monitoringQuoteMaxBlindSec": 60,
         "heartbeatIntervalSec": 300,
         "sessionErrorBackoffSec": 300,
-        "sessionErrorMaxConsecutive": 5
+        "sessionErrorMaxConsecutive": 5,
+        "skipHalfDays": true
       }
     Description: |
       JSON blob of bot strategy settings. CamelCase keys per the existing

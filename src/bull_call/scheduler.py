@@ -233,12 +233,32 @@ class Scheduler:
                 mtd_pnl=mtd_pnl,
             )
 
+        # Half-day skip: NYSE closes at 1 pm ET on a handful of days each year.
+        # The default entry deadline (13:00 ET) coincides with that close, so
+        # there's no headroom to fill, and the holding window halves vs.
+        # what the strategy is sized for. Skip new entries; existing positions
+        # still get monitored + settled (their close_utc was already adjusted
+        # to the half-day 1 pm via session_times).
+        half_day_skip = sessions.is_half_day and self._settings.skip_half_days
+        if half_day_skip:
+            log.warning(
+                "half-day session for %s; skipping new entries — existing "
+                "positions still managed",
+                today_et.isoformat(),
+            )
+            events.emit(
+                "regime_skip",
+                reason="half_day",
+                date=today_et.isoformat(),
+                close_utc=close_utc.isoformat(),
+            )
+
         for symbol in self._settings.symbols:
             today_iso = today_et.isoformat()
             if self._store.today_already_opened(today_iso, symbol):
                 log.info("%s already opened today; skipping", symbol)
                 continue
-            if gate_active:
+            if gate_active or half_day_skip:
                 continue
             self._run_symbol(symbol, today_et, today_iso, close_utc)
 
