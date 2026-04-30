@@ -125,6 +125,42 @@
       ]
     },
     {
+      "name": "event_calendar",
+      "status": "populated",
+      "source": "FOMC announcements (federalreserve.gov/monetarypolicy/fomccalendars.htm) + CPI releases (BLS archive bls.gov/news.release/archives/cpi_*.htm via DOL mirror) + NFP first-Friday-of-month + OPEX third-Friday-of-month (deterministic from calendar)",
+      "vendor": "Federal Reserve + BLS + computed",
+      "license": "Public domain (US government data) / computed from NYSE calendar",
+      "acquired_at": "2026-04-30",
+      "path": "research/data/dataset-v1/event_calendar.parquet",
+      "generator": "research/scripts/generate_event_calendar.py",
+      "inputs": {
+        "fomc_csv": "research/data/dataset-v1/fomc_dates.csv",
+        "cpi_csv": "research/data/dataset-v1/cpi_dates.csv"
+      },
+      "resolution": "daily",
+      "date_range": {
+        "start": "2023-04-30",
+        "end": "2026-04-30"
+      },
+      "row_count": 132,
+      "event_type_counts": {
+        "FOMC": 25,
+        "CPI": 35,
+        "NFP": 36,
+        "OPEX": 36
+      },
+      "checksum": "sha256:030c900436ce54d22828b0d9d6891378e53fd46601b62627bbdfc01955144b13",
+      "schema": [
+        "date",
+        "event_type"
+      ],
+      "known_limitations": [
+        "1 of 35 CPI dates (2023-06-13) is unverified — could not surface a direct BLS archive URL match; date is consistent with the BLS monthly pattern but flagged in the source agent's writeup.",
+        "October 2025 CPI was CANCELLED due to the 2025 federal government shutdown (Oct 1 – Nov 12); this is correctly absent from the list rather than a data gap.",
+        "Same-day overlaps (e.g. FOMC + CPI on 2024-06-12) appear as multiple rows. Deduplicate by date if you only need a 'is this date an event?' set."
+      ]
+    },
+    {
       "name": "trading_calendar",
       "status": "populated",
       "source": "NYSE schedule via pandas_market_calendars",

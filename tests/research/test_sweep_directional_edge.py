@@ -12,6 +12,7 @@ from research.scripts.sweep_directional_edge import (
     CandidateResult,
     _DEFAULT_GRID,
     evaluate_candidate,
+    filter_calendar_excluding_events,
     filter_calendar_to_window,
     sweep,
 )
@@ -119,6 +120,25 @@ def test_sweep_orders_results_by_t_stat_descending() -> None:
     # Std is zero → t-stat is inf or undefined; skip strict ordering check
     # and just verify the sweep ran without crashing.
     assert all(isinstance(r, CandidateResult) for r in results)
+
+
+def test_filter_calendar_excluding_events_drops_listed_dates() -> None:
+    cal = _make_calendar([
+        dt.date(2024, 6, 3),
+        dt.date(2024, 6, 4),
+        dt.date(2024, 6, 5),
+    ])
+    excluded = {dt.date(2024, 6, 4)}
+    out = filter_calendar_excluding_events(cal, excluded_dates=excluded)
+    assert list(out["date"]) == [dt.date(2024, 6, 3), dt.date(2024, 6, 5)]
+
+
+def test_filter_calendar_excluding_events_empty_set_is_noop() -> None:
+    cal = _make_calendar([dt.date(2024, 6, 3), dt.date(2024, 6, 4)])
+    out = filter_calendar_excluding_events(cal, excluded_dates=set())
+    # Same DataFrame (length-equal; identity not required)
+    assert len(out) == len(cal)
+    assert list(out["date"]) == list(cal["date"])
 
 
 def test_sweep_omits_candidates_with_no_signals() -> None:
