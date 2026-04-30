@@ -34,6 +34,7 @@ def test_load_with_defaults_and_required(monkeypatch: pytest.MonkeyPatch) -> Non
     assert s.monitoring_quote_grace_sec == 15
     assert s.monitoring_reconnect_max_attempts == 3
     assert s.monitoring_quote_max_blind_sec == 60
+    assert s.heartbeat_interval_sec == 300
 
 
 def test_min_profit_to_loss_ratio_parses(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -135,6 +136,17 @@ def test_monthly_stop_on_negative_pnl_truthy(
     assert load_settings().monthly_stop_on_negative_pnl is True
 
 
+def test_heartbeat_interval_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Operators can shorten/lengthen the heartbeat cadence via env / SSM
+    without touching code (e.g. tighter cadence in dev for faster alarm
+    feedback)."""
+
+    monkeypatch.setenv("MAX_LOSS_USD", "200")
+    monkeypatch.setenv("HEARTBEAT_INTERVAL_SEC", "60")
+    s = load_settings()
+    assert s.heartbeat_interval_sec == 60
+
+
 def test_monitoring_quote_grace_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MAX_LOSS_USD", "200")
     monkeypatch.setenv("MONITORING_QUOTE_GRACE_SEC", "30")
@@ -230,6 +242,8 @@ def test_max_loss_usd_must_be_positive(
         ("MONITORING_QUOTE_GRACE_SEC", "-5"),
         ("MONITORING_RECONNECT_MAX_ATTEMPTS", "-1"),
         ("MONITORING_QUOTE_MAX_BLIND_SEC", "-10"),
+        ("HEARTBEAT_INTERVAL_SEC", "0"),
+        ("HEARTBEAT_INTERVAL_SEC", "-60"),
     ],
 )
 def test_non_negative_int_settings(
@@ -266,6 +280,7 @@ def test_min_profit_to_loss_ratio_rejects_negative(
         "LEG_FILL_TIMEOUT_SEC", "STOP_LATEST_SEC",
         "MONITORING_QUOTE_GRACE_SEC", "MONITORING_RECONNECT_MAX_ATTEMPTS",
         "MONITORING_QUOTE_MAX_BLIND_SEC", "MIN_PROFIT_TO_LOSS_RATIO",
+        "HEARTBEAT_INTERVAL_SEC",
     ],
 )
 def test_non_numeric_input_names_the_var_in_error(

@@ -47,6 +47,7 @@ _SETTINGS_KEY_MAP: dict[str, str] = {
     "monitoringQuoteGraceSec": "MONITORING_QUOTE_GRACE_SEC",
     "monitoringReconnectMaxAttempts": "MONITORING_RECONNECT_MAX_ATTEMPTS",
     "monitoringQuoteMaxBlindSec": "MONITORING_QUOTE_MAX_BLIND_SEC",
+    "heartbeatIntervalSec": "HEARTBEAT_INTERVAL_SEC",
 }
 
 

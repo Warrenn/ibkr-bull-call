@@ -19,7 +19,7 @@ def _reset_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
                            "STOP_", "STATE_", "LOG_LEVEL", "MIN_PROFIT_TO_LOSS_RATIO",
                            "ENTRY_TIMEOUT_SEC", "ENTRY_DEADLINE_ET",
                            "LEG_FILL_TIMEOUT_SEC", "MONTHLY_",
-                           "MONITORING_", "AWS_")):
+                           "MONITORING_", "HEARTBEAT_", "AWS_")):
             monkeypatch.delenv(key, raising=False)
     yield
 

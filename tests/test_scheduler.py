@@ -8,12 +8,15 @@ delegating to strategy.attempt_until_filled.
 from __future__ import annotations
 
 import datetime as dt
+import logging
+import threading
+import time
 from typing import Any
 
 import pytest
 
 from bull_call.config import Settings
-from bull_call.scheduler import Scheduler
+from bull_call.scheduler import Scheduler, _heartbeat_loop
 from bull_call.state import Store
 
 
@@ -29,6 +32,7 @@ def _settings(**overrides: Any) -> Settings:
         stop_latest_sec=30,
         state_table="bull-call-test",
         log_level="INFO",
+        heartbeat_interval_sec=300,
     )
     base.update(overrides)
     return Settings(**base)
@@ -85,3 +89,75 @@ def test_gate_resets_on_first_session_of_new_month(store: Store) -> None:
     sched = Scheduler(_settings(monthly_stop_on_negative_pnl=True), store)
     assert sched._monthly_gate_active(dt.date(2026, 4, 29)) is True
     assert sched._monthly_gate_active(dt.date(2026, 5, 1)) is False
+
+
+# ---------- heartbeat thread -------------------------------------------------
+
+
+def test_heartbeat_emits_at_configured_cadence(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The heartbeat thread should emit a structured 'heartbeat' event
+    every ``interval_s`` seconds and exit promptly when stop is set."""
+
+    stop_event = threading.Event()
+    interval_s = 0.05
+    caplog.set_level(logging.DEBUG, logger="bull_call.events")
+
+    thread = threading.Thread(
+        target=_heartbeat_loop,
+        kwargs={"interval_s": interval_s, "stop_event": stop_event},
+        daemon=True,
+    )
+    thread.start()
+    try:
+        # Give it time for ~3 emissions.
+        time.sleep(interval_s * 3.5)
+    finally:
+        stop_event.set()
+        thread.join(timeout=interval_s * 5)
+
+    assert not thread.is_alive(), "heartbeat thread did not exit on stop_event"
+    heartbeat_records = [
+        r for r in caplog.records
+        if r.name == "bull_call.events" and '"heartbeat"' in r.getMessage()
+    ]
+    assert len(heartbeat_records) >= 2, (
+        f"expected ≥2 heartbeats over {interval_s * 3.5}s; got {len(heartbeat_records)}"
+    )
+
+
+def test_heartbeat_exits_immediately_when_stop_already_set(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """If stop is already set when the thread starts, it should exit
+    without blocking for ``interval_s`` AND without emitting any event."""
+
+    stop_event = threading.Event()
+    stop_event.set()
+    caplog.set_level(logging.DEBUG, logger="bull_call.events")
+
+    wall_before = time.monotonic()
+    thread = threading.Thread(
+        target=_heartbeat_loop,
+        kwargs={"interval_s": 60.0, "stop_event": stop_event},
+        daemon=True,
+    )
+    thread.start()
+    thread.join(timeout=1.0)
+    elapsed = time.monotonic() - wall_before
+
+    assert not thread.is_alive(), "heartbeat thread did not exit"
+    assert elapsed < 0.5, (
+        f"heartbeat blocked for {elapsed:.2f}s instead of bailing out"
+    )
+    # The "drain on shutdown" semantics: zero emissions when stop is
+    # set before the first wait() call.
+    heartbeat_records = [
+        r for r in caplog.records
+        if r.name == "bull_call.events" and '"heartbeat"' in r.getMessage()
+    ]
+    assert heartbeat_records == [], (
+        f"expected zero heartbeats when stop is already set; "
+        f"got {len(heartbeat_records)}"
+    )
