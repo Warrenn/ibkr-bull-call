@@ -80,6 +80,78 @@ def test_connect_returns_client_when_gateway_ready(
     assert fake.start_tickler_called is True
 
 
+def test_disconnect_calls_stop_tickler() -> None:
+    from bull_call.cpapi import client as cpapi_client
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.stopped = False
+
+        def stop_tickler(self) -> None:
+            self.stopped = True
+
+    fake = FakeClient()
+    cpapi_client.disconnect(fake)  # type: ignore[arg-type]
+    assert fake.stopped is True
+
+
+def test_disconnect_swallows_stop_tickler_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failing tickler-stop must not propagate; we're shutting down,
+    finally-block must run cleanly."""
+
+    import logging
+
+    from bull_call.cpapi import client as cpapi_client
+
+    class FakeClient:
+        def stop_tickler(self) -> None:
+            raise RuntimeError("simulated failure")
+
+    caplog.set_level(logging.WARNING, logger="bull_call.cpapi.client")
+    cpapi_client.disconnect(FakeClient())  # type: ignore[arg-type]
+    # No exception propagated; warning logged.
+    assert any("stop_tickler" in r.getMessage() for r in caplog.records)
+
+
+def test_select_account_id_returns_first_account() -> None:
+    from bull_call.cpapi import client as cpapi_client
+
+    class FakeClient:
+        def portfolio_accounts(self) -> _Resp:
+            return _Resp([{"id": "U1234567"}, {"id": "U7654321"}])
+
+    assert cpapi_client.select_account_id(FakeClient()) == "U1234567"  # type: ignore[arg-type]
+
+
+def test_select_account_id_raises_when_no_accounts() -> None:
+    from bull_call.cpapi import client as cpapi_client
+
+    class FakeClient:
+        def portfolio_accounts(self) -> _Resp:
+            return _Resp([])
+
+    with pytest.raises(RuntimeError, match="no IBKR accounts"):
+        cpapi_client.select_account_id(FakeClient())  # type: ignore[arg-type]
+
+
+def test_select_account_id_coerces_to_str() -> None:
+    """If IBKR returns an integer account id (rare but possible from
+    ibind's permissive parsing), coerce to str so callers get a stable
+    type."""
+
+    from bull_call.cpapi import client as cpapi_client
+
+    class FakeClient:
+        def portfolio_accounts(self) -> _Resp:
+            return _Resp([{"id": 12345}])  # int, not str
+
+    result = cpapi_client.select_account_id(FakeClient())  # type: ignore[arg-type]
+    assert isinstance(result, str)
+    assert result == "12345"
+
+
 def test_connect_short_circuits_after_some_polling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
