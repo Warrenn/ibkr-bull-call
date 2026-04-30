@@ -24,6 +24,18 @@ cfn-lint infra/cloudformation/*.yaml                      # CFN templates
 
 Each of these maps 1:1 to a CI check. If they pass locally, CI passes.
 
+Optional: install pre-commit hooks so the same checks run automatically
+before each commit / push:
+
+```bash
+uv pip install pre-commit
+pre-commit install                 # commit-time hooks (whitespace, yaml, toml)
+pre-commit install --hook-type pre-push   # push-time hooks (pytest, mypy)
+```
+
+Hook config is in `.pre-commit-config.yaml`. CI is the authoritative
+check; pre-commit just makes the feedback loop tight when iterating.
+
 ## Branching + PR workflow
 
 1. **Always branch off `main`.** Never commit directly to main.
