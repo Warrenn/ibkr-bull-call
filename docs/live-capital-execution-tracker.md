@@ -24,8 +24,8 @@ the first evidence runs exist.`
 Track each item as `TODO`, `DOING`, `DONE`, `BLOCKED`, or `KILLED`.
 
 | Item | Status | Evidence / Artifact | Owner | Notes |
-|---|---|---|---|---|
-| Phase 0 repo audit | TODO | this file + test notes | me | Re-check `strategy-review.md` Section 3 against current code |
+| --- | --- | --- | --- | --- |
+| Phase 0 repo audit | DONE | "Notes From Current Repo State" below + PRs #41 #42 | me | Every code-side §3 P0/P1 closed; the two strategy hypotheses (strikes / stop) are deferred to §5.A / §5.B ablation per CONTRIBUTING.md |
 | Data inventory | TODO | `docs/data-inventory.md` | me | Name data sources actually available now |
 | Strategy spec freeze | TODO | `docs/STRATEGY-SPEC-v1.md` | me | Freeze before touching holdout |
 | Directional edge test | TODO | `artifacts/directional-edge-v1/` | me | Fastest falsification step |
@@ -39,9 +39,14 @@ Track each item as `TODO`, `DOING`, `DONE`, `BLOCKED`, or `KILLED`.
 
 These are the items worth doing immediately.
 
-- [ ] Re-audit `strategy-review.md` Section 3 against the repo and mark each item `fixed`, `open`, `strategy hypothesis`, or `needs test`.
-  Output: a short table added to this file or a separate audit note.
+- [x] Re-audit `strategy-review.md` Section 3 against the repo and mark each item `fixed`, `open`, `strategy hypothesis`, or `needs test`.
+  Output: see "Notes From Current Repo State" below — covers every §3
+  item with its closure PR or its Phase 5 ablation slot.
   Exit: no uncertainty about which P0/P1 items are still real blockers.
+  **Status: DONE — all code-side §3 P0/P1 closed in PRs #41 / #42; the
+  two strategy hypotheses (strikes max-width, stop spot-cross) are
+  deferred to `live-capital-go-no-go.md` §5.A / §5.B ablation per
+  CONTRIBUTING.md.**
 
 - [ ] Create `docs/STRATEGY-SPEC-v1.md`.
   Include: entry window, strike-selection logic, exits, overlays, sizing,
@@ -161,8 +166,8 @@ Use this sequence and do not skip ahead.
 
 ## Notes From Current Repo State
 
-The `strategy-review.md` §3 audit is effectively complete after PRs
-#41 and #42:
+After PRs #41 and #42, the `strategy-review.md` §3 audit is effectively
+complete:
 
 - `submit_close_market` `phase_timeout` bug — **fixed** (PR #3, line
   239 uses `timeout_s` correctly).
