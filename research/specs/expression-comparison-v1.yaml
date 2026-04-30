@@ -1,0 +1,94 @@
+spec_id: expression-comparison-v1
+strategy_spec_id: v1
+phase: expression_comparison
+status: frozen_candidate
+
+question: >
+  Given a bullish continuation signal, is the bull call spread a better
+  post-cost expression than long calls or an ES/MES directional proxy?
+
+depends_on:
+  - directional-edge-v1 must conclude EDGE_PRESENT
+
+dataset:
+  version: dataset-v1
+  required_inputs:
+    - spx_spot_intraday
+    - es_or_mes_intraday
+    - spx_0dte_call_chain
+    - trading_calendar
+
+split_policy:
+  train_fraction: 0.6
+  validation_fraction: 0.2
+  holdout_fraction: 0.2
+  holdout_policy: most_recent_untouched_window
+
+signal_source:
+  spec_id: directional-edge-v1
+  candidate_id: D1
+  reuse_same_signal_dates: true
+
+candidates:
+  - candidate_id: E1
+    type: bull_call_spread
+    strike_selector: S1_current_widest_valid
+    exit_policy: simple_same_window_exit
+    notes:
+      - Use the current live-bot spread-construction logic as the control.
+      - Do not add stop-loss, profit-taking, or rolling in this first expression comparison.
+
+  - candidate_id: E2
+    type: long_call
+    strike_selector: ATM_or_near_ATM_placeholder
+    exit_policy: simple_same_window_exit
+    implementation_todo:
+      - freeze long-call strike-selection rule before first run
+
+  - candidate_id: E3
+    type: es_or_mes_proxy
+    exit_policy: simple_same_window_exit
+    implementation_todo:
+      - freeze proxy sizing convention before first run
+
+  - candidate_id: E4
+    type: no_trade_cash_baseline
+    optional: true
+
+cost_model:
+  version: cost-model-v1
+  required_scenarios:
+    - baseline
+    - slippage_2x
+  minimum_components:
+    - commissions_and_fees
+    - entry_slippage
+    - exit_slippage
+
+outputs:
+  report_path: research/reports/expression-comparison-v1.md
+  ledger_path: research/reports/expression-comparison-v1-ledger.csv
+  required_metrics:
+    - trade_count
+    - win_rate
+    - total_net_pnl
+    - net_expectancy_per_trade
+    - max_drawdown_dollars
+    - max_drawdown_percent
+    - worst_month
+    - average_slippage_burden
+    - return_per_unit_drawdown
+    - skipped_trade_rate
+
+decision_rules:
+  continue_if:
+    - bull_call_spread_is_clearly_competitive_after_costs
+    - bull_call_spread_does_not_fail_modest_slippage_stress_immediately
+    - comparison_is_reproducible
+  kill_if:
+    - long_call_or_es_mes_proxy_is_equal_or_better_with_less_complexity
+    - bull_call_spread_is_not_competitive_after_costs
+
+notes:
+  - This phase is intended to answer whether the bull call spread deserves optimization at all.
+  - If E1 loses clearly, stop before building strike-selector or stop-loss comparison machinery.

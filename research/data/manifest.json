@@ -1,0 +1,127 @@
+{
+  "manifest_version": 1,
+  "program": "minimum-viable-backtesting-program",
+  "dataset_version": "dataset-v1",
+  "status": "placeholder",
+  "purpose": "Directional-edge and expression-comparison starter dataset manifest.",
+  "notes": [
+    "Populate this manifest before running evidence-grade backtests.",
+    "Tier 1 data is acceptable for directional-edge and initial expression comparison.",
+    "Tier 2 data is required before trusting stop, profit-taking, rolling, or live-readiness conclusions."
+  ],
+  "split_policy": {
+    "train_fraction": 0.6,
+    "validation_fraction": 0.2,
+    "holdout_fraction": 0.2,
+    "holdout_policy": "Most recent window reserved as untouched holdout per frozen strategy spec."
+  },
+  "datasets": [
+    {
+      "name": "spx_spot_intraday",
+      "status": "required",
+      "source": "TBD",
+      "vendor": "TBD",
+      "license": "TBD",
+      "acquired_at": "TBD",
+      "path": "research/data/dataset-v1/spx_spot_intraday.parquet",
+      "symbol": "SPX",
+      "resolution": "1m minimum; 1s preferred later",
+      "date_range": {
+        "start": "TBD",
+        "end": "TBD"
+      },
+      "checksum": "TBD",
+      "schema": [
+        "ts_utc",
+        "symbol",
+        "price"
+      ],
+      "known_limitations": [
+        "Do not use 1-minute spot alone to validate fine-grained stop behavior."
+      ]
+    },
+    {
+      "name": "es_or_mes_intraday",
+      "status": "required",
+      "source": "TBD",
+      "vendor": "TBD",
+      "license": "TBD",
+      "acquired_at": "TBD",
+      "path": "research/data/dataset-v1/es_intraday.parquet",
+      "symbol": "ES_or_MES",
+      "resolution": "1m minimum; 1s preferred later",
+      "date_range": {
+        "start": "TBD",
+        "end": "TBD"
+      },
+      "checksum": "TBD",
+      "schema": [
+        "ts_utc",
+        "symbol",
+        "price"
+      ],
+      "known_limitations": []
+    },
+    {
+      "name": "spx_0dte_call_chain",
+      "status": "required",
+      "source": "TBD",
+      "vendor": "TBD",
+      "license": "TBD",
+      "acquired_at": "TBD",
+      "path": "research/data/dataset-v1/spx_0dte_call_chain.parquet",
+      "symbol": "SPX",
+      "resolution": "Entry-window and exit-window coverage minimum; 1-5s preferred later",
+      "date_range": {
+        "start": "TBD",
+        "end": "TBD"
+      },
+      "checksum": "TBD",
+      "schema": [
+        "ts_utc",
+        "underlying",
+        "expiry",
+        "right",
+        "strike",
+        "bid",
+        "ask"
+      ],
+      "known_limitations": [
+        "Tier 1 chain data is sufficient for initial expression comparison but not final stop/rolling conclusions."
+      ]
+    },
+    {
+      "name": "trading_calendar",
+      "status": "required",
+      "source": "TBD",
+      "vendor": "TBD",
+      "license": "TBD",
+      "acquired_at": "TBD",
+      "path": "research/data/dataset-v1/trading_calendar.parquet",
+      "resolution": "daily",
+      "date_range": {
+        "start": "TBD",
+        "end": "TBD"
+      },
+      "checksum": "TBD",
+      "schema": [
+        "date",
+        "is_trading_day",
+        "is_half_day",
+        "session_open_utc",
+        "session_close_utc"
+      ],
+      "known_limitations": [
+        "Add event tags later when testing regime and event filters."
+      ]
+    }
+  ],
+  "quality_checks": [
+    "timestamps normalized to UTC",
+    "timestamps monotonic within each source",
+    "duplicate option rows rejected or deduplicated explicitly",
+    "crossed or locked markets flagged",
+    "missing quotes counted and reported",
+    "known limitations documented before use"
+  ]
+}

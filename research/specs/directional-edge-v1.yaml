@@ -1,0 +1,64 @@
+spec_id: directional-edge-v1
+strategy_spec_id: v1
+phase: directional_edge
+status: frozen_candidate
+
+question: >
+  Does bullish intraday continuation have enough standalone same-session edge
+  to justify further work on options-based expressions?
+
+dataset:
+  version: dataset-v1
+  required_inputs:
+    - spx_spot_intraday
+    - es_or_mes_intraday
+    - trading_calendar
+
+split_policy:
+  train_fraction: 0.6
+  validation_fraction: 0.2
+  holdout_fraction: 0.2
+  holdout_policy: most_recent_untouched_window
+
+signal:
+  candidate_id: D1
+  setup_type: bullish_intraday_continuation
+  description: >
+    One bullish continuation signal opportunity per eligible session. The
+    implementation must record `entered = false` and `skip_reason = no_signal`
+    when confirmation does not occur.
+  implementation_todo:
+    - define exact confirmation logic
+    - define earliest eligible signal time
+    - define latest eligible signal time
+
+horizon:
+  exit_basis: fixed_same_session_window
+  implementation_todo:
+    - define end-of-window timestamp
+    - ensure the same horizon is used for SPX and ES/MES directional proxies
+
+outputs:
+  report_path: research/reports/directional-edge-v1.md
+  ledger_path: research/reports/directional-edge-v1-ledger.csv
+  required_metrics:
+    - trade_count
+    - entered_vs_skipped
+    - mean_forward_return
+    - median_forward_return
+    - hit_rate
+    - left_tail_loss
+    - regime_slices_if_available
+
+decision_rules:
+  continue_if:
+    - standalone_directional_expectancy_is_positive
+    - result_is_not_concentrated_in_one_small_regime_cluster
+    - result_is_reproducible
+  kill_if:
+    - standalone_directional_expectancy_is_near_zero_or_negative
+    - behavior_is_obviously_regime_fragile_without_a_salvageable_base_signal
+
+notes:
+  - This phase does not use options structure.
+  - This phase should kill weak ideas quickly before building more complexity.
