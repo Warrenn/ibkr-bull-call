@@ -27,16 +27,33 @@ signal:
     One bullish continuation signal opportunity per eligible session. The
     implementation must record `entered = false` and `skip_reason = no_signal`
     when confirmation does not occur.
-  implementation_todo:
-    - define exact confirmation logic
-    - define earliest eligible signal time
-    - define latest eligible signal time
+  confirmation_logic: >
+    Cumulative intraday return from session_open_price to signal_time_price
+    must be at least signal_threshold. Prices are taken from the OPEN of the
+    1-minute bar at each timestamp (i.e. price observed at HH:MM:00 ET).
+  signal_threshold: 0.0025  # 0.25% open-to-10:30 cumulative return
+  session_open_time_et: "09:30"  # NYSE cash open
+  earliest_eligible_signal_time_et: "10:30"
+  latest_eligible_signal_time_et: "10:30"
+  rationale: >
+    Single fixed signal time at 10:30 ET to keep v1 tight (no time-of-day
+    cross-section to worry about). Matches the bot's default entryTimeEt.
+    +0.25% threshold is the simplest "open is up materially" definition;
+    sweep-friendly later if v1 conclusion is ambiguous.
 
 horizon:
   exit_basis: fixed_same_session_window
-  implementation_todo:
-    - define end-of-window timestamp
-    - ensure the same horizon is used for SPX and ES/MES directional proxies
+  end_of_window_time_et: "15:55"
+  rationale: >
+    15:55 ET avoids the last-5-min closing-auction print noise without giving
+    up much of the directional move. Using OPEN of the 15:55 bar = price
+    observed at 15:55:00 ET.
+  underlying_v1: es_front_month
+  underlying_v1_rationale: >
+    SPX is TBD per data-acquisition-decision; ES front-month is a valid
+    proxy intraday (~0.99 correlation with SPX). If v1 returns EDGE PRESENT
+    we cross-validate against SPX once that dataset lands.
+  pinned_2026_04_30: true
 
 outputs:
   report_path: research/reports/directional-edge-v1.md
