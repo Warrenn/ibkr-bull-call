@@ -232,6 +232,49 @@ class Store:
         items = sorted(resp.get("Items", []), key=lambda r: r.get("sk", ""))
         return [_row_to_spread(item) for item in items]
 
+    def load_stale_open_spreads(self, today: str) -> list[SpreadRecord]:
+        """Return OPEN spread rows from PRIOR days (i.e. not today's date).
+
+        These exist when a prior day's settlement failed — ``fetch_spot``
+        returned ``None``, the sanity band rejected the value, or a stop /
+        outage flatten left a working order at IBKR that wasn't filled.
+        ``load_open_spreads_for_today`` wouldn't surface these (it filters
+        on today's pk), so the row corrupts realized P&L and the monthly
+        capital gate forever unless the operator intervenes.
+
+        The scheduler calls this at session start and emits a
+        ``stale_open_spread`` event per row so CloudWatch alerts fire.
+
+        Implementation note: scans the table with a server-side filter on
+        ``pk begins_with "SPREAD#"`` AND ``pk < "SPREAD#{today}"`` AND
+        ``status == "OPEN"``. ISO date strings sort lexicographically, so
+        the ``<`` comparison correctly excludes today's partition.
+        """
+
+        from boto3.dynamodb.conditions import Attr
+
+        prefix = "SPREAD#"
+        today_pk = _spread_pk(today)
+        filter_expr = (
+            Attr("pk").begins_with(prefix)
+            & Attr("pk").lt(today_pk)
+            & Attr("status").eq("OPEN")
+        )
+
+        items: list[Any] = []
+        last_key: dict[str, Any] | None = None
+        while True:
+            kwargs: dict[str, Any] = {"FilterExpression": filter_expr}
+            if last_key is not None:
+                kwargs["ExclusiveStartKey"] = last_key
+            resp = self._table.scan(**kwargs)
+            items.extend(resp.get("Items", []))
+            last_key = resp.get("LastEvaluatedKey")
+            if last_key is None:
+                break
+        items.sort(key=lambda r: (r.get("pk", ""), r.get("sk", "")))
+        return [_row_to_spread(item) for item in items]
+
     def record_close(
         self,
         *,

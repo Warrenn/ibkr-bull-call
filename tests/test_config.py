@@ -19,7 +19,7 @@ def test_load_with_defaults_and_required(monkeypatch: pytest.MonkeyPatch) -> Non
     assert s.ib_client_id == 7
     assert s.symbols == ("SPX",)
     assert s.max_loss_usd == 200.0
-    assert s.pop_threshold == 0.70
+    assert s.pop_threshold == 0.55
     assert s.risk_free_rate == 0.05
     assert s.entry_time_et == dt.time(10, 30)
     assert s.stop_enabled is True
@@ -71,7 +71,7 @@ def test_overrides_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("IB_HOST", "127.0.0.1")
     monkeypatch.setenv("IB_PORT", "7497")
     monkeypatch.setenv("IB_CLIENT_ID", "42")
-    monkeypatch.setenv("SYMBOLS", "SPX,XSP")
+    monkeypatch.setenv("SYMBOLS", "XSP")  # single-symbol enforced by load_settings
     monkeypatch.setenv("POP_THRESHOLD", "0.85")
     monkeypatch.setenv("RISK_FREE_RATE", "0.04")
     monkeypatch.setenv("ENTRY_TIME_ET", "11:15")
@@ -84,7 +84,7 @@ def test_overrides_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.ib_host == "127.0.0.1"
     assert s.ib_port == 7497
     assert s.ib_client_id == 42
-    assert s.symbols == ("SPX", "XSP")
+    assert s.symbols == ("XSP",)
     assert s.max_loss_usd == 500.0
     assert s.pop_threshold == 0.85
     assert s.risk_free_rate == 0.04
@@ -101,17 +101,59 @@ def test_stop_enabled_truthy_values(monkeypatch: pytest.MonkeyPatch, value: str)
     assert load_settings().stop_enabled is True
 
 
-@pytest.mark.parametrize("value", ["false", "False", "0", "no", "off", ""])
+@pytest.mark.parametrize("value", ["false", "False", "0", "no", "off"])
 def test_stop_enabled_falsy_values(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv("MAX_LOSS_USD", "200")
     monkeypatch.setenv("STOP_ENABLED", value)
     assert load_settings().stop_enabled is False
 
 
+@pytest.mark.parametrize(
+    "value", ["treu", "flase", "yess", "nope", "maybe", "tru", "", " "],
+    ids=["typo-true", "typo-false", "typo-yes", "typo-no",
+         "ambiguous", "truncated", "empty", "whitespace-only"],
+)
+def test_stop_enabled_typo_or_unknown_raises(
+    monkeypatch: pytest.MonkeyPatch, value: str,
+) -> None:
+    """A typo on a safety-critical bool MUST NOT silently default to False —
+    otherwise STOP_ENABLED=treu disables the breakeven stop and the bot
+    runs uncovered. The ``Settings cross-field validation`` story in the
+    docs depends on this: only the explicit whitelist is accepted."""
+
+    monkeypatch.setenv("MAX_LOSS_USD", "200")
+    monkeypatch.setenv("STOP_ENABLED", value)
+    with pytest.raises(ValueError, match="STOP_ENABLED"):
+        load_settings()
+
+
 def test_symbols_strips_whitespace(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MAX_LOSS_USD", "200")
-    monkeypatch.setenv("SYMBOLS", " SPX , XSP ,QQQ ")
-    assert load_settings().symbols == ("SPX", "XSP", "QQQ")
+    # Multi-symbol passes the parser even though load_settings rejects it —
+    # this assertion is on _parse_symbols-only behaviour.
+    from bull_call.config import _parse_symbols
+    assert _parse_symbols(" SPX , XSP ,QQQ ") == ("SPX", "XSP", "QQQ")
+
+
+def test_multi_symbol_config_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Multi-symbol is exposed via SYMBOLS but ``_monitor_open_spreads``
+    runs symbols serially — a second symbol's stop monitor doesn't start
+    until the first ends. Strategy-review.md §3.8 flagged this. Until
+    concurrent monitoring is implemented, fail loud at config load."""
+
+    monkeypatch.setenv("MAX_LOSS_USD", "200")
+    monkeypatch.setenv("SYMBOLS", "SPX,XSP")
+    with pytest.raises(ValueError, match="SYMBOLS"):
+        load_settings()
+
+
+def test_empty_symbols_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Empty SYMBOLS produces a do-nothing daemon; fail loud."""
+
+    monkeypatch.setenv("MAX_LOSS_USD", "200")
+    monkeypatch.setenv("SYMBOLS", "")
+    with pytest.raises(ValueError, match="SYMBOLS"):
+        load_settings()
 
 
 def test_invalid_entry_time_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -121,13 +163,23 @@ def test_invalid_entry_time_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         load_settings()
 
 
-@pytest.mark.parametrize("value", ["false", "False", "0", "no", "off", ""])
+@pytest.mark.parametrize("value", ["false", "False", "0", "no", "off"])
 def test_monthly_stop_on_negative_pnl_can_be_disabled(
     monkeypatch: pytest.MonkeyPatch, value: str,
 ) -> None:
     monkeypatch.setenv("MAX_LOSS_USD", "200")
     monkeypatch.setenv("MONTHLY_STOP_ON_NEGATIVE_PNL", value)
     assert load_settings().monthly_stop_on_negative_pnl is False
+
+
+def test_monthly_stop_typo_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``MONTHLY_STOP_ON_NEGATIVE_PNL=flase`` would silently disable the
+    capital gate. Strict whitelist must catch this."""
+
+    monkeypatch.setenv("MAX_LOSS_USD", "200")
+    monkeypatch.setenv("MONTHLY_STOP_ON_NEGATIVE_PNL", "flase")
+    with pytest.raises(ValueError, match="MONTHLY_STOP_ON_NEGATIVE_PNL"):
+        load_settings()
 
 
 @pytest.mark.parametrize("value", ["true", "True", "1", "yes", "on"])
@@ -139,7 +191,7 @@ def test_monthly_stop_on_negative_pnl_truthy(
     assert load_settings().monthly_stop_on_negative_pnl is True
 
 
-@pytest.mark.parametrize("value", ["false", "False", "0", "no", "off", ""])
+@pytest.mark.parametrize("value", ["false", "False", "0", "no", "off"])
 def test_skip_half_days_can_be_disabled(
     monkeypatch: pytest.MonkeyPatch, value: str,
 ) -> None:

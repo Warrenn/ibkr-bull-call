@@ -1027,6 +1027,48 @@ def test_run_one_session_records_settlements_when_close_sleep_completes(
     assert settle_calls == [today_et]
 
 
+def test_run_one_session_emits_stale_open_spread_event_for_prior_day_orphan(
+    store: Store, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A prior day's failed settlement (e.g. fetch_spot timeout, stop close
+    that didn't fill) leaves an OPEN row in DDB. The scheduler must surface
+    it at session start so an operator alarm fires; otherwise the row
+    silently corrupts realized P&L and the monthly gate forever."""
+
+    store.record_open(
+        date="2026-04-27", symbol="SPX",
+        long_strike=4990.0, short_strike=5000.0, debit=4.0,
+        opened_at="2026-04-27T14:30:00+00:00",
+    )
+
+    sched = Scheduler(_settings(), store)
+    _stub_session_internals(sched, monkeypatch)
+
+    today_et = dt.date(2026, 4, 29)
+    entry_utc = dt.datetime.combine(
+        today_et, dt.time(10, 30), tzinfo=_ET,
+    ).astimezone(dt.timezone.utc)
+    monkeypatch.setattr(sched, "_next_entry_time", lambda now: entry_utc)
+    monkeypatch.setattr(sched, "_sleep_until", lambda target: True)
+    monkeypatch.setattr(sched, "_record_settlements", lambda d: None)
+
+    caplog.set_level(logging.INFO, logger="bull_call.events")
+
+    sched._run_one_session()
+
+    stale_events = [
+        r for r in caplog.records
+        if r.name == "bull_call.events"
+        and "stale_open_spread" in r.getMessage()
+    ]
+    assert stale_events, "expected stale_open_spread event for the orphan row"
+    msg = stale_events[0].getMessage()
+    assert '"2026-04-27#SPX"' in msg or '"2026-04-27"' in msg, (
+        "event must include enough info to locate the orphan row in DDB"
+    )
+
+
 def test_run_one_session_resumes_today_when_started_mid_session(
     store: Store, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

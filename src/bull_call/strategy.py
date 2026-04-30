@@ -400,6 +400,26 @@ def monitor_stop(
                 spot=spot, breakeven=breakeven,
             )
             fill = submit_close()
+            if not fill.filled:
+                # MKT close left working at IBKR (timeout or shutdown
+                # mid-close). avg_fill_price is NaN; computing pnl from it
+                # and writing to DynamoDB raises TypeError ("Infinity and
+                # NaN not supported"), turning a close timeout into an
+                # exception with a still-open IBKR position. Leave the row
+                # OPEN and emit an explicit incomplete-close event so
+                # operator alerting fires; reconcile-on-startup adopts the
+                # working IBKR order on the next session.
+                events.emit(
+                    "spread_close_incomplete",
+                    spread_id=spread_id, exit_kind="STOP",
+                    order_id=fill.order_id, spot=spot, breakeven=breakeven,
+                )
+                log.error(
+                    "stop fired but close MKT did not fill (order_id=%s); "
+                    "row left OPEN — next instance will reconcile",
+                    fill.order_id,
+                )
+                return StopOutcome.FIRED
             pnl = _stop_pnl(store.get_spread(spread_id).debit, fill.avg_fill_price)
             store.record_close(
                 spread_id=spread_id, closed_at=now.isoformat(),
@@ -441,6 +461,22 @@ def _emergency_flatten(
         spread_id, blind_sec,
     )
     fill = submit_close()
+    if not fill.filled:
+        # Same NaN-propagation hazard as the optional-stop path: an
+        # emergency MKT that doesn't fill within timeout would write NaN
+        # pnl to DynamoDB and crash. Leave the row OPEN and signal the
+        # operator; reconcile-on-startup adopts the working IBKR order.
+        events.emit(
+            "spread_close_incomplete",
+            spread_id=spread_id, exit_kind="OUTAGE_FLATTEN",
+            order_id=fill.order_id, blind_sec=blind_sec, breakeven=breakeven,
+        )
+        log.error(
+            "outage flatten did not fill (order_id=%s); row left OPEN — "
+            "next instance will reconcile",
+            fill.order_id,
+        )
+        return StopOutcome.OUTAGE_FLATTEN
     pnl = _stop_pnl(store.get_spread(spread_id).debit, fill.avg_fill_price)
     store.record_close(
         spread_id=spread_id, closed_at=now.isoformat(),

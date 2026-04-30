@@ -192,6 +192,13 @@ class Scheduler:
         # already open on the account into the local store, so the retry
         # loop won't double-open if the state DB was wiped.
         self._reconcile_with_ibkr(today_et)
+        # Surface any prior-day OPEN rows that a failed settlement orphaned.
+        # These are invisible to load_open_spreads_for_today (which filters
+        # on today's pk) and would otherwise corrupt realized P&L and the
+        # monthly capital gate forever. We emit a structured event per row
+        # so an operator alarm fires; the manual-settle runbook lives in
+        # the README.
+        self._emit_stale_open_spread_events(today_et)
 
         # Belt-and-suspenders: cancel any working combo orders left over
         # from a prior crashed run. Reconcile only catches FILLED positions;
@@ -325,6 +332,46 @@ class Scheduler:
             if self._stop_event.wait(timeout=min(remaining, 60.0)):
                 return False
         return False
+
+    def _emit_stale_open_spread_events(self, today_et: dt.date) -> None:
+        """Detect OPEN rows from prior days and emit one event per row.
+
+        These rows exist when a prior session's settlement failed (post-close
+        ``fetch_spot`` returned None / outside the sanity band, or a stop /
+        outage flatten left a working IBKR order that wasn't filled before
+        the session ended). Without this scan they're invisible to
+        ``load_open_spreads_for_today`` and would silently skew the monthly
+        gate's realized-P&L total and trade history forever.
+
+        We do NOT attempt automatic settlement here — recovering the correct
+        settlement value requires the day's CBOE SPX SET print, which the
+        bot doesn't fetch historically. Instead we fail loud: emit a
+        ``stale_open_spread`` event with full row details so the operator's
+        CloudWatch alarm fires. The manual-settle runbook in README walks
+        through the repair.
+        """
+
+        try:
+            stale = self._store.load_stale_open_spreads(today_et.isoformat())
+        except Exception:
+            log.warning(
+                "load_stale_open_spreads raised at session start; "
+                "continuing without stale-row scan", exc_info=True,
+            )
+            return
+        for rec in stale:
+            events.emit(
+                "stale_open_spread",
+                spread_id=rec.id,
+                date=rec.date, symbol=rec.symbol,
+                long_strike=rec.long_strike, short_strike=rec.short_strike,
+                debit=rec.debit, opened_at=rec.opened_at,
+            )
+            log.error(
+                "stale OPEN spread detected: %s — last session's settlement "
+                "did not run; manual settle required (see README runbook)",
+                rec.id,
+            )
 
     def _monthly_gate_active(self, today_et: dt.date) -> bool:
         """Return True if month-to-date realized PnL is negative AND the
