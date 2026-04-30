@@ -208,7 +208,7 @@ def _statistical_context(entered: pd.DataFrame) -> dict[str, Any]:
     std = float(fr.std(ddof=1))
     sem = std / (n ** 0.5) if n > 1 else float("nan")
 
-    if n > 1:
+    if n > 1 and std > 0:
         t_stat = mean / sem
         # Two-tailed p-value against H0: mean == 0
         p_value = float(2 * stats.t.sf(abs(t_stat), df=n - 1))
@@ -217,6 +217,11 @@ def _statistical_context(entered: pd.DataFrame) -> dict[str, Any]:
         ci_low = mean - t_crit * sem
         ci_high = mean + t_crit * sem
     else:
+        # Either too few samples for a t-distribution (n <= 1) or zero
+        # variance (synthetic test data, or one-week stretches with no
+        # forward-return movement). Surface as NaN rather than divide
+        # by zero — the report will display NaN and the operator can
+        # see the candidate has no usable significance estimate.
         t_stat = float("nan")
         p_value = float("nan")
         ci_low = float("nan")

@@ -13,7 +13,26 @@
     "train_fraction": 0.6,
     "validation_fraction": 0.2,
     "holdout_fraction": 0.2,
-    "holdout_policy": "Most recent window reserved as untouched holdout per frozen strategy spec."
+    "holdout_policy": "Most recent window reserved as untouched holdout per frozen strategy spec.",
+    "split_basis": "Computed on 732 full NYSE trading days (excluding half-days) shared by trading_calendar and es_intraday in dataset-v1.",
+    "pinned_2026_04_30": true,
+    "train": {
+      "start_date": "2023-05-01",
+      "end_date": "2025-02-14",
+      "trading_day_count": 439
+    },
+    "validation": {
+      "start_date": "2025-02-18",
+      "end_date": "2025-09-22",
+      "trading_day_count": 146
+    },
+    "holdout": {
+      "start_date": "2025-09-23",
+      "end_date": "2026-04-29",
+      "trading_day_count": 147,
+      "touched_by_v1": true,
+      "touched_by_v1_note": "Phase 1 directional-edge-v1 ran against the full dataset including holdout (PR #55, before split was pinned). Per spec freeze rule, the holdout slot for v1 is now consumed; v2 candidates may use this same holdout window only after they are themselves frozen as STRATEGY-SPEC-v2."
+    }
   },
   "datasets": [
     {
