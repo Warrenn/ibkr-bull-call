@@ -686,6 +686,131 @@ def test_record_settlements_skips_when_spot_unavailable(
     assert any("cannot fetch settle spot" in r.getMessage() for r in caplog.records)
 
 
+# ---------- _monitor_open_spreads error branches ---------------------------
+
+
+def test_monitor_open_spreads_no_op_when_no_open_rows(
+    store: Store, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no open spreads, _monitor_open_spreads sleeps until close
+    (so the scheduler still pauses for the rest of the session) and
+    makes zero IBKR calls."""
+
+    sched = Scheduler(_settings(), store)
+    sched._client = object()  # type: ignore[assignment]
+    sched._account_id = "A1"
+
+    # Stop_event already set → _sleep_until returns False immediately.
+    sched._stop_event.set()
+
+    # Trip a guard if any IBKR-side function gets called.
+    monkeypatch.setattr(
+        "bull_call.scheduler.fetch_0dte_call_chain",
+        lambda *a, **kw: pytest.fail("should not fetch chain when no open spreads"),
+    )
+    monkeypatch.setattr(
+        "bull_call.scheduler.open_ws",
+        lambda *a, **kw: pytest.fail("should not open WS when no open spreads"),
+    )
+
+    close_utc = dt.datetime(2026, 4, 29, 20, 0, tzinfo=dt.timezone.utc)
+    sched._monitor_open_spreads(dt.date(2026, 4, 29), close_utc)
+
+
+def test_monitor_open_spreads_skips_spread_when_chain_unavailable(
+    store: Store, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Open spread exists but ``fetch_0dte_call_chain`` returns None
+    (e.g. delayed quotes mid-session) — log error, skip, don't crash."""
+
+    sched = Scheduler(_settings(), store)
+    sched._client = object()  # type: ignore[assignment]
+    sched._account_id = "A1"
+
+    store.record_open(
+        date="2026-04-29", symbol="SPX",
+        long_strike=4995.0, short_strike=5005.0, debit=5.50,
+        opened_at="2026-04-29T14:30:00+00:00",
+    )
+
+    monkeypatch.setattr(
+        "bull_call.scheduler.fetch_0dte_call_chain",
+        lambda *a, **kw: None,
+    )
+
+    class _StubWs:
+        def shutdown(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "bull_call.scheduler.open_ws", lambda *a, **kw: _StubWs(),
+    )
+
+    caplog.set_level(logging.ERROR, logger="bull_call.scheduler")
+    close_utc = dt.datetime(2026, 4, 29, 20, 0, tzinfo=dt.timezone.utc)
+    sched._monitor_open_spreads(dt.date(2026, 4, 29), close_utc)
+
+    assert any(
+        "cannot rebuild chain" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_monitor_open_spreads_short_circuits_on_shutdown(
+    store: Store, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If ``_stop_event`` is already set when the per-spread loop
+    iteration starts, monitor returns without subscribing to ticks."""
+
+    sched = Scheduler(_settings(), store)
+    sched._client = object()  # type: ignore[assignment]
+    sched._account_id = "A1"
+
+    store.record_open(
+        date="2026-04-29", symbol="SPX",
+        long_strike=4995.0, short_strike=5005.0, debit=5.50,
+        opened_at="2026-04-29T14:30:00+00:00",
+    )
+
+    # Chain returns valid data so we'd otherwise enter monitor_stop.
+    from bull_call.chain import ChainSnapshot, OptionContract
+    from bull_call.strikes import OptionQuote
+
+    chain = ChainSnapshot(
+        symbol="SPX", expiry="20260429", spot=5000.0, atm_iv=0.18,
+        quotes=(OptionQuote(strike=4995.0, bid=5.0, ask=5.2),),
+        contracts={
+            4995.0: OptionContract(strike=4995.0, conid=111, right="C", expiry="20260429"),
+            5005.0: OptionContract(strike=5005.0, conid=222, right="C", expiry="20260429"),
+        },
+    )
+    monkeypatch.setattr(
+        "bull_call.scheduler.fetch_0dte_call_chain",
+        lambda *a, **kw: chain,
+    )
+
+    class _StubWs:
+        def shutdown(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "bull_call.scheduler.open_ws", lambda *a, **kw: _StubWs(),
+    )
+
+    # subscribe_underlying must NOT be called: shutdown short-circuits
+    # before that point.
+    monkeypatch.setattr(
+        "bull_call.scheduler.subscribe_underlying",
+        lambda *a, **kw: pytest.fail("subscribe should not be called after shutdown"),
+    )
+
+    sched._stop_event.set()
+
+    close_utc = dt.datetime(2026, 4, 29, 20, 0, tzinfo=dt.timezone.utc)
+    sched._monitor_open_spreads(dt.date(2026, 4, 29), close_utc)
+
+
 @pytest.mark.parametrize(
     "raised",
     [KeyboardInterrupt(), SystemExit(0)],
