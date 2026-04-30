@@ -33,7 +33,8 @@ Parameters:
         "monthlyStopOnNegativePnl": true,
         "monitoringQuoteGraceSec": 15,
         "monitoringReconnectMaxAttempts": 3,
-        "monitoringQuoteMaxBlindSec": 60
+        "monitoringQuoteMaxBlindSec": 60,
+        "heartbeatIntervalSec": 300
       }
     Description: |
       JSON blob of bot strategy settings. CamelCase keys per the existing

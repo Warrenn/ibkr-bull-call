@@ -155,6 +155,11 @@ class Settings:
     # Total blind window since last fresh tick before emergency MKT flatten.
     # Must be >= monitoring_quote_grace_sec.
     monitoring_quote_max_blind_sec: int = 60
+    # Liveness signal: cadence (seconds) at which a background thread emits
+    # a structured "heartbeat" event. CloudWatch alarms use absence of this
+    # event to detect a frozen process during long quiet stretches (waiting
+    # for entry, holding through quiet periods between stop-arm and fire).
+    heartbeat_interval_sec: int = 300
 
 
 def load_settings(env: dict[str, str] | None = None) -> Settings:
@@ -207,6 +212,10 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
             "reconnect attempt fires (R23a invariant)."
         )
 
+    heartbeat_interval_sec = _parse_positive_int(
+        src, "HEARTBEAT_INTERVAL_SEC", default=300,
+    )
+
     entry_time_et = _parse_time(src.get("ENTRY_TIME_ET", "10:30"), "ENTRY_TIME_ET")
     entry_deadline_et = _parse_time(
         src.get("ENTRY_DEADLINE_ET", "13:00"), "ENTRY_DEADLINE_ET",
@@ -241,4 +250,5 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         monitoring_quote_grace_sec=monitoring_quote_grace_sec,
         monitoring_reconnect_max_attempts=monitoring_reconnect_max_attempts,
         monitoring_quote_max_blind_sec=monitoring_quote_max_blind_sec,
+        heartbeat_interval_sec=heartbeat_interval_sec,
     )

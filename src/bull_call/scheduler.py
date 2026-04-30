@@ -49,6 +49,22 @@ log = logging.getLogger(__name__)
 _ET = ZoneInfo("America/New_York")
 
 
+def _heartbeat_loop(*, interval_s: float, stop_event: threading.Event) -> None:
+    """Emit a 'heartbeat' event every ``interval_s`` until ``stop_event`` is set.
+
+    Intended to run in a daemon thread. Returns promptly after stop_event
+    fires (Event.wait honours signals immediately). Each emission goes
+    through ``events.emit`` so it lands as a structured JSON line in
+    CloudWatch — operators can alarm on absence of heartbeat events to
+    detect a frozen daemon during long quiet stretches.
+    """
+
+    while not stop_event.is_set():
+        if stop_event.wait(timeout=interval_s):
+            return
+        events.emit("heartbeat")
+
+
 class Scheduler:
     def __init__(self, settings: Settings, store: Store) -> None:
         self._settings = settings
@@ -65,10 +81,28 @@ class Scheduler:
         self._client = connect(should_stop_fn=self._stop_event.is_set)
         self._account_id = select_account_id(self._client)
         log.info("connected to gateway; account=%s", self._account_id)
+
+        # Periodic liveness signal so CloudWatch can alarm on a frozen
+        # daemon during long quiet stretches (waiting for entry, holding
+        # through quiet periods between stop-arm and fire). Daemon thread
+        # so it doesn't block shutdown if ``run_forever`` exits abruptly.
+        heartbeat_thread = threading.Thread(
+            target=_heartbeat_loop,
+            kwargs={
+                "interval_s": float(self._settings.heartbeat_interval_sec),
+                "stop_event": self._stop_event,
+            },
+            name="bull-call-heartbeat",
+            daemon=True,
+        )
+        heartbeat_thread.start()
+
         try:
             while not self._stop_event.is_set():
                 self._run_one_session()
         finally:
+            self._stop_event.set()
+            heartbeat_thread.join(timeout=5.0)
             assert self._client is not None
             disconnect(self._client)
 
