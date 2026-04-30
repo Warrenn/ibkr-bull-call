@@ -63,14 +63,16 @@ class Candidate:
     threshold: float
     signal_time_et: str
     eow_time_et: str
+    vix_band: str | None = None  # None | "low" | "high" — v3 regime gate
 
     @property
     def label(self) -> str:
-        return (
+        base = (
             f"thr={self.threshold:.4%} "
             f"signal={self.signal_time_et} "
             f"eow={self.eow_time_et}"
         )
+        return f"{base} vix={self.vix_band}" if self.vix_band else base
 
 
 _DEFAULT_GRID: tuple[Candidate, ...] = tuple(
@@ -94,6 +96,62 @@ class CandidateResult:
     by_year_min: float  # smallest per-year mean (regime stability)
     verdict_simple: str
     verdict_nuanced: str
+
+
+def compute_prior_vix_by_date(vix_df: pd.DataFrame) -> dict[dt.date, float]:
+    """Map each VIX-data date to the VIX close of the *previous* day.
+
+    This is the conventional regime indicator: at signal time on
+    day t (10:30 ET), the operator already knows VIX from t-1.
+    Day 0 of the dataset has no prior-day value and is omitted.
+    """
+
+    sorted_df = vix_df.sort_values("date").reset_index(drop=True)
+    out: dict[dt.date, float] = {}
+    for i in range(1, len(sorted_df)):
+        out[sorted_df["date"].iloc[i]] = float(sorted_df["close"].iloc[i - 1])
+    return out
+
+
+def median_prior_vix_in_window(
+    *,
+    prior_vix_by_date: dict[dt.date, float],
+    start: dt.date,
+    end: dt.date,
+) -> float:
+    """Median of prior-day VIX close across dates in ``[start, end]``.
+
+    Used to define low/high bands by data-driven median split — no
+    arbitrary thresholds.
+    """
+
+    in_window = [
+        v for d, v in prior_vix_by_date.items() if start <= d <= end
+    ]
+    if not in_window:
+        raise RuntimeError(
+            f"no VIX dates in window {start} → {end}; "
+            "check VIX data coverage",
+        )
+    return float(pd.Series(in_window).median())
+
+
+def filter_calendar_by_vix_band(
+    calendar: pd.DataFrame,
+    *,
+    prior_vix_by_date: dict[dt.date, float],
+    band: str,  # "low" | "high"
+    median: float,
+) -> pd.DataFrame:
+    """Drop rows whose prior-day VIX is outside the requested band."""
+
+    def in_band(d: dt.date) -> bool:
+        prior = prior_vix_by_date.get(d)
+        if prior is None:
+            return False
+        return prior < median if band == "low" else prior >= median
+
+    return calendar[calendar["date"].apply(in_band)].copy()
 
 
 def filter_calendar_to_window(
@@ -161,12 +219,16 @@ def evaluate_candidate(
     yearly = sc["yearly"]
     by_year_min = float(yearly["mean"].min()) if len(yearly) > 0 else float("nan")
 
-    if metrics.verdict == "EDGE_PRESENT":
+    # v3-aware: a significantly NEGATIVE t-stat is mean-reversion edge,
+    # not just NO_EDGE. Look at |t-stat| and the sign separately.
+    if abs(sc["t_stat"]) >= 2.0:
         nuanced = (
-            "EDGE_PRESENT_AND_SIGNIFICANT"
-            if abs(sc["t_stat"]) >= 2.0
-            else "EDGE_INCONCLUSIVE"
+            "EDGE_PRESENT_CONTINUATION"
+            if sc["t_stat"] > 0
+            else "EDGE_PRESENT_MEAN_REVERSION"
         )
+    elif metrics.verdict == "EDGE_PRESENT":
+        nuanced = "EDGE_INCONCLUSIVE"
     else:
         nuanced = "NO_EDGE"
 
@@ -191,14 +253,36 @@ def sweep(
     bars: pd.DataFrame,
     calendar: pd.DataFrame,
     candidates: tuple[Candidate, ...] = _DEFAULT_GRID,
+    vix_filter: dict[str, dict[dt.date, float] | float] | None = None,
 ) -> list[CandidateResult]:
+    """Run the candidate grid against ``calendar``.
+
+    If ``vix_filter`` is provided, candidates whose ``vix_band`` is
+    set will further restrict the calendar to dates whose prior-day
+    VIX is in the requested band before evaluation.
+
+    ``vix_filter`` shape::
+
+        {"prior_vix_by_date": dict[date, float], "median": float}
+    """
+
     results: list[CandidateResult] = []
     for c in candidates:
-        r = evaluate_candidate(bars=bars, calendar=calendar, candidate=c)
+        if c.vix_band is not None and vix_filter is not None:
+            cal_for_c = filter_calendar_by_vix_band(
+                calendar,
+                prior_vix_by_date=vix_filter["prior_vix_by_date"],  # type: ignore[arg-type]
+                band=c.vix_band,
+                median=vix_filter["median"],  # type: ignore[arg-type]
+            )
+        else:
+            cal_for_c = calendar
+        r = evaluate_candidate(bars=bars, calendar=cal_for_c, candidate=c)
         if r is not None:
             results.append(r)
-    # Sort by t-stat descending (most significant first).
-    results.sort(key=lambda r: r.t_stat, reverse=True)
+    # Sort by absolute t-stat descending (catches both continuation
+    # and mean-reversion edges in the same ranking).
+    results.sort(key=lambda r: abs(r.t_stat), reverse=True)
     return results
 
 
@@ -231,16 +315,17 @@ def format_report(
         "v2 evidence requires a frozen v2 spec evaluated on the **holdout**",
         "window after a one-shot validation pass.",
         "",
-        "## Candidates ranked by t-stat (most significant first)",
+        "## Candidates ranked by |t-stat| (most significant first; sign indicates direction)",
         "",
-        "| threshold | signal_time | eow_time | n | mean | t-stat | p-value | 95% CI | hit_rate | by_year_min | verdict |",
-        "|---|---|---|---|---|---|---|---|---|---|---|",
+        "| threshold | signal_time | eow_time | vix_band | n | mean | t-stat | p-value | 95% CI | hit_rate | by_year_min | verdict |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in results:
         c = r.candidate
+        vix = c.vix_band or "—"
         lines.append(
             f"| {c.threshold:.4%} | {c.signal_time_et} | {c.eow_time_et} | "
-            f"{r.n} | {r.mean:+.4%} | {r.t_stat:+.2f} | {r.p_value:.3f} | "
+            f"{vix} | {r.n} | {r.mean:+.4%} | {r.t_stat:+.2f} | {r.p_value:.3f} | "
             f"[{r.ci_low_95:+.4%}, {r.ci_high_95:+.4%}] | "
             f"{r.hit_rate:.1%} | {r.by_year_min:+.4%} | {r.verdict_nuanced} |"
         )
@@ -293,6 +378,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "excluded from eligibility (v2 event-filter). Schema: "
              "date, event_type.",
     )
+    p.add_argument(
+        "--vix-data", type=Path, default=None,
+        help="Optional vix_daily.parquet — when present, the sweep "
+             "duplicates each candidate into low/high VIX bands using "
+             "a median split on prior-day VIX close within the window.",
+    )
     return p.parse_args(argv)
 
 
@@ -318,7 +409,33 @@ def main(argv: list[str] | None = None) -> int:
         )
         excluded_count = before - len(cal_window)
 
-    results = sweep(bars=bars, calendar=cal_window)
+    candidates = _DEFAULT_GRID
+    vix_filter: dict[str, object] | None = None
+    vix_median: float | None = None
+    if args.vix_data is not None:
+        vix_df = pd.read_parquet(args.vix_data)
+        prior_vix = compute_prior_vix_by_date(vix_df)
+        vix_median = median_prior_vix_in_window(
+            prior_vix_by_date=prior_vix,
+            start=args.window_start,
+            end=args.window_end,
+        )
+        vix_filter = {"prior_vix_by_date": prior_vix, "median": vix_median}
+        candidates = tuple(
+            Candidate(
+                threshold=c.threshold,
+                signal_time_et=c.signal_time_et,
+                eow_time_et=c.eow_time_et,
+                vix_band=band,
+            )
+            for c in _DEFAULT_GRID
+            for band in ("low", "high")
+        )
+
+    results = sweep(
+        bars=bars, calendar=cal_window,
+        candidates=candidates, vix_filter=vix_filter,  # type: ignore[arg-type]
+    )
 
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.csv.parent.mkdir(parents=True, exist_ok=True)
@@ -340,6 +457,7 @@ def main(argv: list[str] | None = None) -> int:
             "threshold": r.candidate.threshold,
             "signal_time": r.candidate.signal_time_et,
             "eow_time": r.candidate.eow_time_et,
+            "vix_band": r.candidate.vix_band or "",
             "n": r.n,
             "mean": r.mean,
             "std": r.std,
@@ -357,6 +475,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"sweep window: {args.window_name} ({args.window_start} → {args.window_end})")
     if args.event_calendar is not None:
         print(f"event filter: excluded {excluded_count} event days from window")
+    if args.vix_data is not None and vix_median is not None:
+        print(f"VIX gate: median split at prior-day close = {vix_median:.2f}")
     print(f"candidates evaluated: {len(results)}")
     if results:
         top = results[0]

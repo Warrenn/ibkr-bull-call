@@ -11,9 +11,12 @@ from research.scripts.sweep_directional_edge import (
     Candidate,
     CandidateResult,
     _DEFAULT_GRID,
+    compute_prior_vix_by_date,
     evaluate_candidate,
+    filter_calendar_by_vix_band,
     filter_calendar_excluding_events,
     filter_calendar_to_window,
+    median_prior_vix_in_window,
     sweep,
 )
 
@@ -139,6 +142,105 @@ def test_filter_calendar_excluding_events_empty_set_is_noop() -> None:
     # Same DataFrame (length-equal; identity not required)
     assert len(out) == len(cal)
     assert list(out["date"]) == list(cal["date"])
+
+
+def test_compute_prior_vix_by_date_shifts_by_one_trading_day() -> None:
+    """At signal time on day t, the operator already knows VIX from
+    t-1's close. The mapping must be date_t → VIX_close_at_t-1."""
+
+    vix = pd.DataFrame({
+        "date": [dt.date(2024, 6, 3), dt.date(2024, 6, 4), dt.date(2024, 6, 5)],
+        "close": [15.0, 17.5, 20.1],
+    })
+    out = compute_prior_vix_by_date(vix)
+    # Day 0 has no prior — omitted
+    assert dt.date(2024, 6, 3) not in out
+    # Day 1's prior is day 0's close
+    assert out[dt.date(2024, 6, 4)] == 15.0
+    assert out[dt.date(2024, 6, 5)] == 17.5
+
+
+def test_median_prior_vix_in_window_uses_only_in_window_dates() -> None:
+    prior = {
+        dt.date(2024, 1, 1): 10.0,  # outside window
+        dt.date(2024, 6, 1): 15.0,
+        dt.date(2024, 6, 15): 25.0,
+        dt.date(2024, 6, 30): 20.0,
+        dt.date(2024, 12, 1): 50.0,  # outside window
+    }
+    median = median_prior_vix_in_window(
+        prior_vix_by_date=prior,
+        start=dt.date(2024, 6, 1),
+        end=dt.date(2024, 6, 30),
+    )
+    # Median of [15.0, 25.0, 20.0] = 20.0
+    assert median == 20.0
+
+
+def test_median_prior_vix_raises_on_empty_window() -> None:
+    with pytest.raises(RuntimeError, match="no VIX dates"):
+        median_prior_vix_in_window(
+            prior_vix_by_date={},
+            start=dt.date(2024, 6, 1),
+            end=dt.date(2024, 6, 30),
+        )
+
+
+def test_filter_calendar_by_vix_band_low_keeps_only_below_median() -> None:
+    cal = _make_calendar([
+        dt.date(2024, 6, 3),
+        dt.date(2024, 6, 4),
+        dt.date(2024, 6, 5),
+    ])
+    prior = {
+        dt.date(2024, 6, 3): 12.0,  # low (below median 15)
+        dt.date(2024, 6, 4): 18.0,  # high
+        dt.date(2024, 6, 5): 14.0,  # low
+    }
+    out = filter_calendar_by_vix_band(
+        cal, prior_vix_by_date=prior, band="low", median=15.0,
+    )
+    assert list(out["date"]) == [dt.date(2024, 6, 3), dt.date(2024, 6, 5)]
+
+
+def test_filter_calendar_by_vix_band_high_keeps_only_at_or_above_median() -> None:
+    cal = _make_calendar([
+        dt.date(2024, 6, 3),
+        dt.date(2024, 6, 4),
+        dt.date(2024, 6, 5),
+    ])
+    prior = {
+        dt.date(2024, 6, 3): 12.0,
+        dt.date(2024, 6, 4): 18.0,  # high (>= median 15)
+        dt.date(2024, 6, 5): 15.0,  # exactly at median: high
+    }
+    out = filter_calendar_by_vix_band(
+        cal, prior_vix_by_date=prior, band="high", median=15.0,
+    )
+    assert list(out["date"]) == [dt.date(2024, 6, 4), dt.date(2024, 6, 5)]
+
+
+def test_filter_calendar_by_vix_band_drops_dates_with_no_prior_vix() -> None:
+    """A date that's not in the prior_vix_by_date mapping (e.g. first
+    day of dataset, or a missing VIX session) is dropped, not
+    inadvertently treated as low/high band."""
+
+    cal = _make_calendar([dt.date(2024, 6, 3), dt.date(2024, 6, 4)])
+    prior = {dt.date(2024, 6, 4): 18.0}  # missing 6/3
+    out = filter_calendar_by_vix_band(
+        cal, prior_vix_by_date=prior, band="high", median=15.0,
+    )
+    assert list(out["date"]) == [dt.date(2024, 6, 4)]
+
+
+def test_candidate_label_includes_vix_band_when_set() -> None:
+    c_no_vix = Candidate(threshold=0.005, signal_time_et="10:30", eow_time_et="15:55")
+    c_with_vix = Candidate(
+        threshold=0.005, signal_time_et="10:30", eow_time_et="15:55",
+        vix_band="high",
+    )
+    assert "vix=" not in c_no_vix.label
+    assert "vix=high" in c_with_vix.label
 
 
 def test_sweep_omits_candidates_with_no_signals() -> None:
