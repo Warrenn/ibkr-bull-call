@@ -74,17 +74,22 @@ def stream_ticks(
 
     last_yield: dt.datetime | None = None
     while True:
+        # Pre-block bail: if the session is already over, exit without
+        # spending another full ``poll_timeout_s`` blocked on get().
+        if dt.datetime.now(dt.timezone.utc) >= close_utc:
+            return
+
         try:
             raw = accessor.get(block=True, timeout=poll_timeout_s)
             spot: float | None = _spot_from_message(raw)
         except queue.Empty:
             spot = None
 
-        # Single post-block ``now`` — reused for the close-utc check, the
-        # silence-interval check, and the yielded timestamp. Sampling pre-block
-        # would undercount silence by up to ``poll_timeout_s`` (the time spent
-        # blocked); using one consistent timestamp per iteration also keeps
-        # the blind-window accounting in monitor_stop coherent.
+        # Single post-block ``now`` — reused for the post-block close-utc
+        # check (in case close passed *during* the block), the silence-
+        # interval check, and the yielded timestamp. Sampling pre-block for
+        # these would undercount silence by up to ``poll_timeout_s`` and
+        # keep blind-window accounting in monitor_stop coherent.
         now = dt.datetime.now(dt.timezone.utc)
         if now >= close_utc:
             return

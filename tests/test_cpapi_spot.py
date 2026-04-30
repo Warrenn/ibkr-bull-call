@@ -39,12 +39,18 @@ class FakeAccessor:
 
 
 class SleepingEmptyAccessor:
-    """Each .get() sleeps for ``sleep_s`` then raises queue.Empty.
+    """Each .get() sleeps for ``sleep_s`` then raises queue.Empty — UP TO
+    ``max_calls`` times, after which it raises immediately without sleeping.
 
-    Used to verify that ``stream_ticks`` measures wall-clock elapsed time
-    AFTER the blocking call, not before it. We assert the production code
-    calls ``get(block=True, timeout=...)`` so the contract is locked in
-    addition to being exercised — the params are not just style decoration.
+    The post-cap fast-path is purely a runaway-loop safety guard: tests
+    only need a handful of sleep-then-empty calls to verify timing
+    behaviour, but ``stream_ticks`` is an infinite generator. Without the
+    cap, a regression that loops more than expected would block the test
+    process for ``sleep_s * forever``.
+
+    We also assert the production code calls ``get(block=True, timeout=...)``
+    so the contract is locked in addition to being exercised — the params
+    are not just style decoration.
     """
 
     def __init__(self, sleep_s: float, max_calls: int) -> None:
@@ -58,6 +64,8 @@ class SleepingEmptyAccessor:
         assert block is True, "stream_ticks must call get with block=True"
         assert timeout > 0, "stream_ticks must pass a positive poll timeout"
         self._calls += 1
+        # Safety cap: after max_calls, raise immediately without sleeping
+        # so a misbehaving generator can't block the test indefinitely.
         if self._calls > self._max_calls:
             raise queue.Empty
         time.sleep(self._sleep_s)
@@ -198,3 +206,28 @@ def test_stream_stops_at_close_utc() -> None:
     stream = stream_ticks(accessor, close_utc=close_utc, poll_timeout_s=0.001)
     out = list(stream)
     assert out == []
+
+
+def test_stream_returns_without_blocking_when_close_already_passed() -> None:
+    """Regression: the loop must check close_utc BEFORE the blocking get(),
+    so a stream started after the session has ended doesn't waste one full
+    poll_timeout_s blocked before noticing.
+
+    With a 1s poll_timeout and a 5ms wall budget, only a pre-block check
+    can satisfy the assertion."""
+
+    accessor = SleepingEmptyAccessor(sleep_s=1.0, max_calls=5)
+    close_utc = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
+
+    wall_before = time.monotonic()
+    stream = stream_ticks(accessor, close_utc=close_utc, poll_timeout_s=1.0)
+    out = list(stream)
+    elapsed = time.monotonic() - wall_before
+
+    assert out == []
+    assert elapsed < 0.05, (
+        f"stream blocked for {elapsed:.3f}s before noticing close_utc — "
+        "expected < 50ms via pre-block check"
+    )
+    # Confirms we never even called get():
+    assert accessor.observed_calls == []
