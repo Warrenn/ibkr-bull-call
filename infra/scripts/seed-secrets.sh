@@ -12,8 +12,11 @@ PROFILE="${AWS_PROFILE:-busyweb}"
 REGION="${AWS_REGION:-us-east-1}"
 PREFIX="/${ENV}/ibkr-bull-call"
 
-read -p "IBKR username: " USERID
-read -s -p "IBKR password: " PASSWORD
+# -r so backslashes in the username/password are taken literally
+# (otherwise read interprets them as line-continuations and mangles the
+# input — disastrous for a password that happens to contain a backslash).
+read -r -p "IBKR username: " USERID
+read -r -s -p "IBKR password: " PASSWORD
 echo
 
 aws --profile "$PROFILE" --region "$REGION" ssm put-parameter \
