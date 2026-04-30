@@ -228,6 +228,33 @@
       ]
     },
     {
+      "name": "vol_etps_daily",
+      "status": "populated",
+      "source": "Yahoo Finance auto-adjusted close via yfinance",
+      "vendor": "Yahoo Finance",
+      "license": "Public free data; usage governed by Yahoo's terms (research-only single-seat is in scope)",
+      "acquired_at": "2026-04-30",
+      "path": "research/data/dataset-v1/vol_etps_daily.parquet",
+      "generator": "research/scripts/download_vol_etps.py",
+      "symbols": ["VXX", "SVXY", "VIX", "VIX3M"],
+      "resolution": "daily Close (auto-adjusted for splits + dividends)",
+      "date_range": {
+        "start": "2018-01-02",
+        "end": "2026-04-30"
+      },
+      "row_count": 2093,
+      "all_tickers_available_from": "2018-01-25",
+      "all_tickers_available_from_note": "VIX3M data series begins later than VXX/SVXY/VIX in yfinance; rows before 2018-01-25 may have NaN in VIX3M.",
+      "checksum": "sha256:f37e1cd9aa0fc6934c3ff9daea592aef2a4a195b52cb4cfbcc26d0289f066453",
+      "schema": ["date", "VXX", "SVXY", "VIX", "VIX3M"],
+      "known_limitations": [
+        "SVXY's leverage was -1.0× pre-2018-02-28 then permanently changed to -0.5× after Volmageddon (Feb 5 2018, XIV terminated). Auto-adjusted close folds the rebase implicitly; analyses using this dataset for windows starting after 2018-03 are entirely in -0.5× territory.",
+        "VXX is now an ETN; original 2009-vintage VXX was redeemed in 2019 and replaced; auto-adjusted prices stitch across this transition.",
+        "VIX3M (^VIX3M) is the Cboe S&P 500 3-Month Volatility Index. If unavailable from yfinance, fallback to legacy ticker VXV.",
+        "Same Yahoo-revision caveat as vix_daily/tlt_daily."
+      ]
+    },
+    {
       "name": "sector_etfs_daily",
       "status": "populated",
       "source": "Yahoo Finance auto-adjusted close via yfinance",
