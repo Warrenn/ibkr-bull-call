@@ -37,16 +37,19 @@ jobs:
         run: uv run pytest -q
 
       - name: Type-check (mypy)
-        # boto3 / ibind have no upstream stubs, so mypy will report
-        # missing-imports for those — known and accepted. Treat any
-        # other error as a CI failure.
+        # boto3 / ibind / scipy / pandas / pandas_market_calendars have
+        # no upstream stubs (or none we want as a runtime cost), so
+        # mypy will report missing-imports for those — known and
+        # accepted. Treat any other error as a CI failure.
+        #
+        # mypy emits two related but distinct phrasings depending on
+        # whether stubs exist on PyPI vs. the package having no
+        # ``py.typed`` marker. Filter both.
         run: |
           uv run mypy src 2>&1 | tee mypy.out
-          # Allowed: missing-import errors for boto3 / ibind / botocore.
-          # Anything else fails the job.
           if grep -E "^src/.*error:" mypy.out \
               | grep -v "missing library stubs or py.typed marker" \
-              | grep -v "^Found .* errors? in"; then
+              | grep -v "^.*: error: Library stubs not installed for"; then
             echo "::error::mypy reported errors beyond known missing-stubs warnings"
             exit 1
           fi
