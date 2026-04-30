@@ -250,6 +250,93 @@ def submit_close_market(
     return FillReport(filled=False, avg_fill_price=math.nan, order_id=order_id)
 
 
+# Statuses that mean an order is still working at IBKR (and thus a candidate
+# for orphan cleanup). Anything else (Filled, Cancelled, Inactive, Rejected)
+# is terminal — leave it.
+_WORKING_STATUSES = frozenset({
+    "submitted", "presubmitted", "pre_submitted",
+    "pending_submit", "pending_cancel",
+})
+
+
+def _is_orphan_combo(order: dict[str, Any]) -> bool:
+    """True iff this live-orders entry is a working bull-call combo we own.
+
+    The conidex prefix check (``28812380;;;...``) is a defensive filter so
+    we don't accidentally cancel an unrelated BAG order an operator might
+    have placed manually via TWS while debugging.
+    """
+
+    sec_type = (order.get("secType") or order.get("sec_type") or "").upper()
+    status = (order.get("status") or "").lower()
+    conidex = order.get("conidex") or ""
+    if sec_type != "BAG":
+        return False
+    if status not in _WORKING_STATUSES:
+        return False
+    return conidex.startswith(f"{_USD_SPREAD_CONID};;;")
+
+
+def cancel_orphaned_combo_orders(
+    client: IbkrClient,
+    *,
+    account_id: str,
+) -> int:
+    """Cancel any working bull-call combo orders left at IBKR from a prior run.
+
+    Called once at session start, BEFORE the entry loop submits anything new.
+    Any working combo at that moment is necessarily orphaned: the bot hasn't
+    submitted today, and yesterday's TIF=DAY orders auto-cancelled at the
+    4 pm close. Skipping this lets a SIGKILL-mid-entry orphan double-fill
+    when the next instance submits its own entry alongside it.
+
+    Returns the number of orders successfully cancelled. Per-order cancel
+    failures are logged WARNING and swallowed — orphan cleanup is best-effort
+    and must never abort startup.
+    """
+
+    try:
+        resp = client.live_orders(filters=["submitted", "pre_submitted"])
+    except Exception as exc:
+        log.warning("live_orders query failed at session start: %s", exc)
+        return 0
+
+    raw = resp.data if hasattr(resp, "data") else resp
+    if isinstance(raw, dict):
+        orders = raw.get("orders") or []
+    elif isinstance(raw, list):
+        orders = raw
+    else:
+        orders = []
+
+    cancelled = 0
+    for order in orders:
+        if not isinstance(order, dict) or not _is_orphan_combo(order):
+            continue
+        order_id = (
+            order.get("order_id")
+            or order.get("orderId")
+            or order.get("orderID")
+        )
+        if not order_id:
+            continue
+        try:
+            client.cancel_order(order_id=str(order_id), account_id=account_id)
+        except Exception as exc:
+            log.warning(
+                "failed to cancel orphaned combo order %s: %s",
+                order_id, exc,
+            )
+            continue
+        log.warning(
+            "cancelled orphaned combo order %s (conidex=%s, status=%s) "
+            "left over from prior run",
+            order_id, order.get("conidex"), order.get("status"),
+        )
+        cancelled += 1
+    return cancelled
+
+
 def _qty_for_conid(client: IbkrClient, *, account_id: str, conid: int) -> int:
     """Return the signed position quantity for ``conid`` on ``account_id``.
 
