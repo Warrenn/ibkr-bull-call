@@ -240,3 +240,114 @@ def test_submit_close_market_unfilled_returns_filled_false(monkeypatch: pytest.M
     )
 
     assert fill.filled is False
+
+
+# ---------- SIGTERM-aware fill polling (PR #8) -------------------------------
+
+
+def test_submit_close_market_short_circuits_on_should_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``should_stop_fn`` returns True between polls, the close path
+    bails out without burning the full timeout budget. The order is left
+    working at IBKR — the next instance's reconcile will pick it up.
+    """
+
+    from bull_call.chain import OptionContract
+    from bull_call.cpapi import execution
+
+    long_leg = OptionContract(strike=4995.0, conid=111, right="C", expiry="20260429")
+    short_leg = OptionContract(strike=5005.0, conid=222, right="C", expiry="20260429")
+
+    poll_count = [0]
+
+    class _Resp:
+        def __init__(self, data: Any) -> None:
+            self.data = data
+
+    class FakeClient:
+        def place_order(self, *, order_request: Any, answers: Any, account_id: str) -> _Resp:
+            return _Resp([{"order_id": "close-1"}])
+
+        def order_status(self, *, order_id: str) -> _Resp:
+            poll_count[0] += 1
+            return _Resp({"order_status": "Submitted"})  # never Filled
+
+    monkeypatch.setattr(execution.time, "sleep", lambda _s: None)
+
+    flag = {"stop": False}
+    def stop_fn() -> bool:
+        if poll_count[0] >= 2:
+            flag["stop"] = True
+        return flag["stop"]
+
+    import time as _time
+    wall_before = _time.monotonic()
+    fill = execution.submit_close_market(
+        FakeClient(),  # type: ignore[arg-type]
+        account_id="A1",
+        long_leg=long_leg,
+        short_leg=short_leg,
+        timeout_s=300.0,                       # generous budget; should NOT be hit
+        should_stop_fn=stop_fn,
+    )
+    elapsed = _time.monotonic() - wall_before
+
+    assert fill.filled is False
+    assert elapsed < 1.0, (
+        f"submit_close_market did not respect should_stop_fn: "
+        f"elapsed={elapsed:.2f}s with timeout_s=300"
+    )
+    assert poll_count[0] >= 2  # we did at least the polls before stop tripped
+
+
+def test_verify_legs_balanced_short_circuits_on_should_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same shutdown semantics for the post-fill leg-balance polling: bail
+    out promptly instead of running out the full leg_fill_timeout_sec."""
+
+    from bull_call.chain import OptionContract
+    from bull_call.cpapi import execution
+
+    long_leg = OptionContract(strike=4995.0, conid=111, right="C", expiry="20260429")
+    short_leg = OptionContract(strike=5005.0, conid=222, right="C", expiry="20260429")
+
+    polls = [0]
+
+    class _Resp:
+        def __init__(self, data: Any) -> None:
+            self.data = data
+
+    class FakeClient:
+        def positions_by_conid(self, *, account_id: str, conid: str) -> _Resp:
+            polls[0] += 1
+            # Long leg shows +1, short leg shows 0 (never balanced).
+            if int(conid) == 111:
+                return _Resp([{"conid": 111, "position": 1.0}])
+            return _Resp([])
+
+    monkeypatch.setattr(execution.time, "sleep", lambda _s: None)
+
+    flag = {"stop": False}
+    def stop_fn() -> bool:
+        if polls[0] >= 2:
+            flag["stop"] = True
+        return flag["stop"]
+
+    import time as _time
+    wall_before = _time.monotonic()
+    balanced = execution.verify_legs_balanced(
+        FakeClient(),  # type: ignore[arg-type]
+        account_id="A1",
+        long_leg=long_leg,
+        short_leg=short_leg,
+        timeout_s=300.0,
+        poll_interval_s=0.0,
+        should_stop_fn=stop_fn,
+    )
+    elapsed = _time.monotonic() - wall_before
+
+    assert balanced is False
+    assert elapsed < 1.0
+    assert polls[0] >= 2

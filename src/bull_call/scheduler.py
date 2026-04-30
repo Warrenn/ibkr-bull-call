@@ -61,7 +61,7 @@ class Scheduler:
         self._stop_event.set()
 
     def run_forever(self) -> None:
-        self._client = connect()
+        self._client = connect(should_stop_fn=self._stop_event.is_set)
         self._account_id = select_account_id(self._client)
         log.info("connected to gateway; account=%s", self._account_id)
         try:
@@ -224,6 +224,16 @@ class Scheduler:
             today_et, self._settings.entry_deadline_et, _ET,
         ).astimezone(dt.timezone.utc)
 
+        # §3.7 + PR #8: signal-aware sleep + signal-aware fill polling.
+        # Event.wait responds to SIGTERM during soft retries; the same
+        # is_set callable is threaded into the cpapi fill-polling loops so
+        # SIGTERM mid-fill exits within one poll interval instead of
+        # running out the full 150s phase budget.
+        stop_event = self._stop_event
+
+        def signal_aware_sleep(seconds: float) -> None:
+            stop_event.wait(timeout=seconds)
+
         def fetch_chain():  # type: ignore[no-untyped-def]
             return fetch_0dte_call_chain(client, symbol=symbol, today_et=today_et)
 
@@ -233,6 +243,7 @@ class Scheduler:
                 account_id=account_id,
                 min_profit_to_loss_ratio=ratio,
                 timeout_s=entry_timeout,
+                should_stop_fn=stop_event.is_set,
                 **kw,
             )
 
@@ -241,6 +252,7 @@ class Scheduler:
                 client, account_id=account_id,
                 long_leg=long_leg, short_leg=short_leg,
                 timeout_s=leg_timeout,
+                should_stop_fn=stop_event.is_set,
             )
 
         def flatten_unmatched_leg(*, long_leg, short_leg):  # type: ignore[no-untyped-def]
@@ -248,14 +260,6 @@ class Scheduler:
                 client, account_id=account_id,
                 long_leg=long_leg, short_leg=short_leg,
             )
-
-        # §3.7: signal-aware sleep — Event.wait responds to SIGTERM during
-        # soft retries, so the bot can exit cleanly mid-sleep instead of
-        # waiting up to soft_retry_delay_s seconds.
-        stop_event = self._stop_event
-
-        def signal_aware_sleep(seconds: float) -> None:
-            stop_event.wait(timeout=seconds)
 
         attempt_until_filled(
             self._store,
@@ -320,7 +324,9 @@ class Scheduler:
                 def submit_close(**kw):  # type: ignore[no-untyped-def]
                     return submit_close_market(
                         client, account_id=account_id,
-                        long_leg=long_leg, short_leg=short_leg, **kw,
+                        long_leg=long_leg, short_leg=short_leg,
+                        should_stop_fn=stop_event.is_set,
+                        **kw,
                     )
 
                 def estimate_credit() -> float | None:
