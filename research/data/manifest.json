@@ -125,6 +125,37 @@
       ]
     },
     {
+      "name": "vix_daily",
+      "status": "populated",
+      "source": "Yahoo Finance ^VIX daily OHLCV via yfinance",
+      "vendor": "Yahoo Finance",
+      "license": "Public free data; usage governed by Yahoo's terms (research-only single-seat is in scope)",
+      "acquired_at": "2026-04-30",
+      "path": "research/data/dataset-v1/vix_daily.parquet",
+      "generator": "research/scripts/download_vix.py",
+      "symbol": "^VIX",
+      "resolution": "daily OHLC + Volume",
+      "date_range": {
+        "start": "2023-05-01",
+        "end": "2026-04-30"
+      },
+      "row_count": 753,
+      "checksum": "sha256:5eee766836addb227288dff79265391a99530b8f17922f5bcfce9ab99438434f",
+      "schema": [
+        "date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume"
+      ],
+      "known_limitations": [
+        "Yahoo Finance can revise data for indices, though VIX revisions are rare. The pinned sha256 is the snapshot at acquisition; a future re-pull producing a different sha256 means upstream data drifted.",
+        "Volume is always 0 (VIX is an index, not a tradable instrument); included for schema consistency, ignored downstream.",
+        "Daily resolution is sufficient for the v3 regime gate (prior-day close as conventional indicator). Tier 2 intraday VIX would come from Databento OPRA if needed later."
+      ]
+    },
+    {
       "name": "event_calendar",
       "status": "populated",
       "source": "FOMC announcements (federalreserve.gov/monetarypolicy/fomccalendars.htm) + CPI releases (BLS archive bls.gov/news.release/archives/cpi_*.htm via DOL mirror) + NFP first-Friday-of-month + OPEX third-Friday-of-month (deterministic from calendar)",
