@@ -87,6 +87,21 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         float(raw_min_ratio) if raw_min_ratio else None
     )
 
+    monitoring_quote_grace_sec = int(
+        src.get("MONITORING_QUOTE_GRACE_SEC", "15"),
+    )
+    monitoring_quote_max_blind_sec = int(
+        src.get("MONITORING_QUOTE_MAX_BLIND_SEC", "60"),
+    )
+    if monitoring_quote_max_blind_sec < monitoring_quote_grace_sec:
+        raise ValueError(
+            "MONITORING_QUOTE_MAX_BLIND_SEC "
+            f"({monitoring_quote_max_blind_sec}) must be >= "
+            f"MONITORING_QUOTE_GRACE_SEC ({monitoring_quote_grace_sec}); "
+            "otherwise the bot would emergency-flatten before any "
+            "reconnect attempt fires (R23a invariant)."
+        )
+
     return Settings(
         ib_host=src.get("IB_HOST", "ibgateway"),
         ib_port=int(src.get("IB_PORT", "4002")),
@@ -109,13 +124,9 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         monthly_stop_on_negative_pnl=_parse_bool(
             src.get("MONTHLY_STOP_ON_NEGATIVE_PNL", "true"),
         ),
-        monitoring_quote_grace_sec=int(
-            src.get("MONITORING_QUOTE_GRACE_SEC", "15"),
-        ),
+        monitoring_quote_grace_sec=monitoring_quote_grace_sec,
         monitoring_reconnect_max_attempts=int(
             src.get("MONITORING_RECONNECT_MAX_ATTEMPTS", "3"),
         ),
-        monitoring_quote_max_blind_sec=int(
-            src.get("MONITORING_QUOTE_MAX_BLIND_SEC", "60"),
-        ),
+        monitoring_quote_max_blind_sec=monitoring_quote_max_blind_sec,
     )

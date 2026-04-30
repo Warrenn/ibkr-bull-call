@@ -74,27 +74,37 @@ def stream_ticks(
 
     last_yield: dt.datetime | None = None
     while True:
+        # Pre-block bail: if the session is already over, exit without
+        # spending another full ``poll_timeout_s`` blocked on get().
+        if dt.datetime.now(dt.timezone.utc) >= close_utc:
+            return
+
+        try:
+            raw = accessor.get(block=True, timeout=poll_timeout_s)
+            spot: float | None = _spot_from_message(raw)
+        except queue.Empty:
+            spot = None
+
+        # Single post-block ``now`` — reused for the post-block close-utc
+        # check (in case close passed *during* the block), the silence-
+        # interval check, and the yielded timestamp. Sampling pre-block for
+        # these would undercount silence by up to ``poll_timeout_s`` and
+        # keep blind-window accounting in monitor_stop coherent.
         now = dt.datetime.now(dt.timezone.utc)
         if now >= close_utc:
             return
-        try:
-            raw = accessor.get(block=True, timeout=poll_timeout_s)
-        except queue.Empty:
-            # No message at all this poll; consider emitting a silence tick.
-            if last_yield is None or (now - last_yield).total_seconds() >= silence_emit_interval_s:
-                last_yield = now
-                yield None, now
-            continue
-        spot = _spot_from_message(raw)
+
         if spot is None:
-            # Junk/heartbeat — also consider emitting a silence tick if we've
-            # been quiet long enough on real prices.
+            # Empty queue or unusable message (heartbeat/junk). Emit a silence
+            # sentinel only if enough wall-clock has passed since the last
+            # yield, so monitor_stop can drive R23a outage detection.
             if last_yield is None or (now - last_yield).total_seconds() >= silence_emit_interval_s:
                 last_yield = now
                 yield None, now
             continue
-        last_yield = dt.datetime.now(dt.timezone.utc)
-        yield spot, last_yield
+
+        last_yield = now
+        yield spot, now
 
 
 def _spot_from_message(message: object) -> float | None:
