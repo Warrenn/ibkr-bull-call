@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancel in-flight runs on the same ref when a new push lands. Saves CI
+# minutes when iterating quickly on a PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: pytest + mypy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Install Python + dev deps
+        run: uv sync --extra dev
+
+      - name: Run test suite
+        run: uv run pytest -q
+
+      - name: Type-check (mypy)
+        # boto3 / ibind / scipy / pandas / pandas_market_calendars have
+        # no upstream stubs (or none we want as a runtime cost), so
+        # mypy will report missing-imports for those — known and
+        # accepted. Treat any other error as a CI failure.
+        #
+        # mypy emits two related but distinct phrasings depending on
+        # whether stubs exist on PyPI vs. the package having no
+        # ``py.typed`` marker. Filter both.
+        #
+        # The grep filter alone is unsafe: a mypy config/infra failure
+        # that exits non-zero but produces no matching ``^src/.*error:``
+        # line (rare but possible — internal errors, format changes)
+        # would silently pass. Capture mypy's exit code explicitly and
+        # only suppress it if every error in the output matches an
+        # allowed-stub pattern.
+        run: |
+          set +e
+          uv run mypy src 2>&1 | tee mypy.out
+          mypy_rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$mypy_rc" -eq 0 ]; then
+            echo "mypy clean."
+            exit 0
+          fi
+          # mypy exited non-zero — figure out why.
+          unexpected=$(grep -E "^src/.*error:" mypy.out \
+              | grep -v "missing library stubs or py.typed marker" \
+              | grep -v "Library stubs not installed for" || true)
+          if [ -n "$unexpected" ]; then
+            echo "::error::mypy reported errors beyond known missing-stubs warnings"
+            echo "$unexpected"
+            exit 1
+          fi
+          # Only allowed-stub warnings on src/ lines, but mypy still
+          # exited non-zero — investigate (could be a syntax error in
+          # mypy.ini / pyproject [tool.mypy], internal mypy crash, etc).
+          if ! grep -qE "^src/.*error:" mypy.out; then
+            echo "::error::mypy exited rc=$mypy_rc with no matching src/ error lines — config or internal failure"
+            exit "$mypy_rc"
+          fi
+          echo "mypy non-zero rc but only allowed missing-stubs warnings; treating as success."
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck infra/scripts/
+        # Use ``find -exec`` instead of a bare glob: a bare
+        # ``infra/scripts/*.sh`` would pass the literal pattern to
+        # shellcheck if the directory ever became empty, producing a
+        # confusing "file not found" failure. ``find ... -exec`` returns
+        # cleanly when no files match. We DO want a clear failure if
+        # the directory itself is gone, so check for it explicitly.
+        run: |
+          test -d infra/scripts || { echo "::error::infra/scripts directory missing"; exit 1; }
+          find infra/scripts -maxdepth 1 -name '*.sh' -type f -print0 \
+            | xargs -0 -r shellcheck
+
+  cfn-lint:
+    name: cfn-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install cfn-lint
+        run: pip install cfn-lint
+      - name: Lint CloudFormation templates
+        run: |
+          test -d infra/cloudformation || { echo "::error::infra/cloudformation directory missing"; exit 1; }
+          find infra/cloudformation -maxdepth 1 -name '*.yaml' -type f -print0 \
+            | xargs -0 -r cfn-lint

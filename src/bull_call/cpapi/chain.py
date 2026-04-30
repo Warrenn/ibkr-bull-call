@@ -14,6 +14,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import math
+from typing import Any
 
 from ibind import IbkrClient
 
@@ -53,7 +54,7 @@ def _expiry_yyyymmdd(date: dt.date) -> str:
 def _is_realtime(availability: str | None) -> bool:
     """First char R == real-time; D/Z/Y/N indicate delayed/frozen/none."""
 
-    return bool(availability) and availability[0] == "R"
+    return availability is not None and len(availability) > 0 and availability[0] == "R"
 
 
 def _safe_float(value: object) -> float:
@@ -207,7 +208,7 @@ def fetch_0dte_call_chain(
     )
 
 
-def _spot_from_row(row: dict) -> float | None:
+def _spot_from_row(row: dict[str, Any]) -> float | None:
     for field in (_FIELD_LAST_PRICE, _FIELD_BID_PRICE, _FIELD_ASK_PRICE):
         v = _safe_float(row.get(field))
         if math.isfinite(v) and v > 0:

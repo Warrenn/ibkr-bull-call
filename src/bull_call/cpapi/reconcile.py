@@ -13,6 +13,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 from ibind import IbkrClient
 
@@ -54,7 +55,7 @@ def detect_existing_spreads(
     # SPX (AM-settled monthly) — those have different settlement semantics
     # and the bot's monitor / settlement logic assumes SPXW (PM-settled,
     # 4 pm ET). See strategy-review.md §3.2.
-    candidates: list[dict] = []
+    candidates: list[dict[str, Any]] = []
     for row in raw:
         if (row.get("assetClass") or "").upper() != "OPT":
             continue
@@ -80,7 +81,7 @@ def detect_existing_spreads(
         candidates.append(row)
 
     # Group by underlying ticker.
-    by_ticker: dict[str, list[dict]] = {}
+    by_ticker: dict[str, list[dict[str, Any]]] = {}
     for row in candidates:
         ticker = (row.get("ticker") or row.get("underlying") or "").upper()
         if not ticker:
@@ -154,7 +155,7 @@ def detect_existing_spreads(
     return spreads
 
 
-def _signed_qty(row: dict) -> float:
+def _signed_qty(row: dict[str, Any]) -> float:
     """Return the position quantity with sign (long > 0, short < 0)."""
 
     return float(row.get("position") or 0.0)

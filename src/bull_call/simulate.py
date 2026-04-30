@@ -219,7 +219,7 @@ def run(
         return 0.0 if estimate_zero_credit else exit_credit
 
     outcome = monitor_stop(
-        store,
+        store,                              # type: ignore[arg-type]  # _InMemoryStore is duck-compatible
         spread_id=sid,
         breakeven=breakeven,
         settings=settings,

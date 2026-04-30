@@ -77,4 +77,4 @@ def select_account_id(client: IbkrClient) -> str:
     accounts = response.data
     if not accounts:
         raise RuntimeError("no IBKR accounts visible to the gateway")
-    return accounts[0]["id"]
+    return str(accounts[0]["id"])

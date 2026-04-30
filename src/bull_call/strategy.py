@@ -38,7 +38,7 @@ class StopOutcome(Enum):
 
 @dataclass(frozen=True, slots=True)
 class OpenResult:
-    spread_id: int
+    spread_id: str  # composite "{date}#{symbol}" — see state._spread_id
     fill_price: float
 
 
@@ -234,7 +234,7 @@ def open_spread(
         opened_at=now_utc.isoformat(),
     )
     log.info(
-        "opened %s %s/%s @ %.2f (sid=%d)",
+        "opened %s %s/%s @ %.2f (sid=%s)",
         chain.symbol, spread.long_strike, spread.short_strike,
         fill.avg_fill_price, sid,
     )

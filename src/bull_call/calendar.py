@@ -27,7 +27,9 @@ def _calendar():  # type: ignore[no-untyped-def]
 def _to_utc(ts: pd.Timestamp) -> dt.datetime:
     if ts.tzinfo is None:
         ts = ts.tz_localize("UTC")
-    return ts.tz_convert("UTC").to_pydatetime()
+    # pandas's to_pydatetime is typed as Any (no upstream stubs); cast.
+    result: dt.datetime = ts.tz_convert("UTC").to_pydatetime()
+    return result
 
 
 def _schedule_for(date: dt.date) -> pd.Series | None:

@@ -17,6 +17,7 @@ import logging
 import math
 import queue
 from collections.abc import Iterator
+from typing import Any
 
 from ibind import IbkrClient, IbkrWsClient, IbkrWsKey, QueueAccessor
 
@@ -114,7 +115,7 @@ def _spot_from_message(message: object) -> float | None:
     didn't decode.  We check the standard fields in order: last, midpoint, bid.
     """
 
-    data: dict | None = None
+    data: dict[str, Any] | None = None
     if isinstance(message, dict):
         data = message
     elif isinstance(message, (bytes, str)):
