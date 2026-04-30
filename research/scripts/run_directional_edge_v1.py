@@ -422,6 +422,7 @@ def run(
     window_end: dt.date | None = None,
     event_calendar_path: Path | None = None,
     vix_data_path: Path | None = None,
+    bond_data_path: Path | None = None,
 ) -> DirectionalEdgeResult:
     """Run a directional-edge spec on a (possibly-filtered) calendar window.
 
@@ -468,6 +469,20 @@ def run(
             median=float(vix_cfg["prior_vix_threshold"]),
         )
 
+    # Optional bond direction filter (v4-C+).
+    bond_cfg = spec.get("bond_filter", {})
+    if bond_cfg.get("enabled") and bond_data_path is not None:
+        from research.scripts.sweep_directional_edge import (
+            compute_prior_day_return_sign, filter_calendar_by_bond_direction,
+        )
+        bond_df = pd.read_parquet(bond_data_path)
+        prior_bond = compute_prior_day_return_sign(bond_df)
+        cal = filter_calendar_by_bond_direction(
+            cal,
+            prior_bond_sign_by_date=prior_bond,
+            direction=bond_cfg["direction"],
+        )
+
     sig = spec["signal"]
     horiz = spec["horizon"]
 
@@ -490,6 +505,20 @@ def run(
         prices_per_day=prices,
         signal_threshold=sig["signal_threshold"],
     )
+
+    # Direction handling for v4+: a "fade" spec means the trade is the
+    # OPPOSITE of the signal direction. We invert forward_return so all
+    # downstream metrics (mean, t-stat, verdict) are reported as profit
+    # in the chosen trade direction. v1-v3 specs default to "long".
+    direction = spec.get("direction", "long")
+    if direction == "fade":
+        ledger = ledger.copy()
+        ledger["forward_return"] = -ledger["forward_return"]
+    elif direction != "long":
+        raise ValueError(
+            f"unknown direction '{direction}' in spec; expected long|fade",
+        )
+
     metrics = aggregate_metrics(ledger)
     stats_ctx = _statistical_context(ledger[ledger["entered"]])
 
@@ -539,6 +568,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Optional vix_daily.parquet — used by v3+ when the "
                         "spec contains a vix_filter section with "
                         "enabled: true")
+    p.add_argument("--bond-data", type=Path, default=None,
+                   help="Optional bond ETF/futures daily parquet (e.g. TLT) "
+                        "— used by v4+ when the spec contains a bond_filter "
+                        "section with enabled: true")
     return p.parse_args(argv)
 
 
@@ -559,6 +592,7 @@ def main(argv: list[str] | None = None) -> int:
         window_end=args.window_end,
         event_calendar_path=args.event_calendar,
         vix_data_path=args.vix_data,
+        bond_data_path=args.bond_data,
     )
     print(f"verdict: {result.metrics.verdict}")
     print(f"trade_count: {result.metrics.trade_count}")

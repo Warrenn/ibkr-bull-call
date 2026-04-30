@@ -124,6 +124,26 @@ These are the items worth doing immediately.
   dead in three different ways. See `docs/STRATEGY-SPEC-v3.md`,
   `research/reports/directional-edge-v3-validation.md`.
 
+  **v4 update (2026-04-30, PR #61 + #62)**: pivoted to mean-reversion
+  direction with VIX-low + bonds-up combined gate. v4 train sweep
+  across three new mechanics (gap fade, afternoon mean rev, bond
+  gate) plus combined sweep found ONE candidate with n≥30 + |t|≥2:
+  0.10%/10:00/lowVIX/bondsUp/fade, n=31, t=-2.10, p=0.044. Naive
+  significance but Bonferroni-adjusted p≈1.5 across 35 trials.
+  Validation result: **n=1 trade** — the low-VIX + bonds-up regime
+  was almost absent from the spring-2025 high-VIX validation
+  window. The single trade lost 0.23% in fade direction. v4 KILLED
+  unambiguously; holdout slot preserved. **FOUR specs, four
+  failures**: each new spec adds dimensions of filtering, finds
+  TRAIN candidates with t≥2, then fails validation in a different
+  way (v2 outlier-driven, v3 gate-no-op, v4 regime-absent).
+  Textbook overfitting in a small-data research project. The
+  bullish/bearish intraday continuation/reversion hypothesis is not
+  extractable from this data at v1-v4 resolutions. Any v5 must be
+  a genuinely different research framing (different timeframe,
+  different asset, different observation window) — not "v4 with
+  one more parameter." See `docs/STRATEGY-SPEC-v4.md`.
+
 ## NEXT
 
 Do these only if the `NOW` block clears.
