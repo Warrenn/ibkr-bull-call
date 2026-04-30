@@ -46,7 +46,11 @@ if ! aws --profile "$PROFILE" --region "$REGION" s3api head-bucket --bucket "$BU
 fi
 
 TAR=$(mktemp -t "bull-call.${VERSION}.XXXXXX").tar.gz
-trap "rm -f $TAR" EXIT
+# Single-quote the trap body so $TAR expands at signal time, not now —
+# defends against the rare case where TAR is mutated later (or contains
+# shell metachars; tarball names interpolate VERSION which comes from a
+# CLI arg).
+trap 'rm -f "$TAR"' EXIT
 git archive --format=tar.gz -o "$TAR" HEAD
 SIZE=$(du -h "$TAR" | awk '{print $1}')
 SHA=$(shasum -a 256 "$TAR" | awk '{print $1}')
