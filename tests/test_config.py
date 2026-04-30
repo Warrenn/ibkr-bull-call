@@ -256,6 +256,32 @@ def test_min_profit_to_loss_ratio_rejects_negative(
         load_settings()
 
 
+# ---------- non-numeric inputs name the offending var ------------------
+
+
+@pytest.mark.parametrize(
+    "var",
+    [
+        "POP_THRESHOLD", "RISK_FREE_RATE", "ENTRY_TIMEOUT_SEC",
+        "LEG_FILL_TIMEOUT_SEC", "STOP_LATEST_SEC",
+        "MONITORING_QUOTE_GRACE_SEC", "MONITORING_RECONNECT_MAX_ATTEMPTS",
+        "MONITORING_QUOTE_MAX_BLIND_SEC", "MIN_PROFIT_TO_LOSS_RATIO",
+    ],
+)
+def test_non_numeric_input_names_the_var_in_error(
+    monkeypatch: pytest.MonkeyPatch, var: str,
+) -> None:
+    """Sourcery #9: misconfigured numeric settings used to surface only the
+    generic 'could not convert string to float'. Each var should now name
+    itself in the error so an operator hitting CloudWatch can find the bad
+    SSM key without grep'ing source."""
+
+    monkeypatch.setenv("MAX_LOSS_USD", "200")
+    monkeypatch.setenv(var, "not-a-number")
+    with pytest.raises(ValueError, match=var):
+        load_settings()
+
+
 def test_settings_is_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MAX_LOSS_USD", "200")
     s = load_settings()
