@@ -1,0 +1,161 @@
+spec_id: strategy-spec-v7-short-iron-condor
+strategy_spec_id: v7
+phase: phase_1_initial_test
+status: frozen_for_60mo_test
+parent_spec: strategy-spec-v6-bull-call (PRs #1-#68, KILLED)
+parent_result: STRATEGY_AS_DESIGNED_LOSES_BREAKEVEN_STOP_DESTROYS_EDGE
+
+question: >
+  Does a short SPX 0DTE iron condor (no breakeven stop, monthly
+  capital cap only) extract the proven vol risk premium (PR #63:
+  implied = 2× realized) while avoiding the v6 failure mode (stop
+  loss converting 79% of trades into bid-ask-cost losses)?
+
+dataset:
+  version: dataset-v1
+  required_inputs:
+    - es_or_mes_intraday  # 60mo
+    - vix_daily            # 60mo
+    - trading_calendar     # 60mo
+    - event_calendar       # 60mo (FOMC + CPI + NFP + OPEX)
+
+split_policy:
+  train_fraction: 0.6
+  validation_fraction: 0.2
+  holdout_fraction: 0.2
+  pinned_in_manifest: true
+
+mechanic:
+  position: short_iron_condor
+  position_legs:
+    - SHORT call at near-OTM strike (inner call leg)
+    - LONG call at further-OTM strike (outer call leg, protective)
+    - SHORT put at near-OTM strike (inner put leg)
+    - LONG put at further-OTM strike (outer put leg, protective)
+  net_open: net credit (we receive premium)
+  expiry: same-day SPX (PM cash settlement at 4:00 PM ET)
+
+entry:
+  time_et: "09:32"
+  daily: true  # entry attempted every full NYSE trading day, no signal gate
+  half_day_skip: true  # skip NYSE early-close days
+  event_day_skip: configurable (default: skip FOMC + CPI + NFP + OPEX)
+
+strike_selection:
+  description: >
+    Mirrored version of v6's strike walk algorithm. For each side
+    (call and put), find the inner SHORT strike via descending
+    distance walk (gap criterion), then the outer LONG strike via
+    further walk subject to per-side max-loss + combined-POP
+    constraints.
+
+  call_side:
+    short_call_walk: >
+      Walk DOWN from highest strikes. For each K, gap(K) = ask(K) -
+      bid(K_up) where K_up = K + strike_spacing. Continue while gap <
+      strike_width. Pick LOWEST K satisfying — this is the SHORT
+      call strike (closest to ATM that meets the gap criterion).
+    long_call_walk: >
+      Walk UP from short_call_K + strike_spacing. For each K':
+      per_side_credit_call = bid(short_call_K) - ask(K').
+      Continue while wing_width × 100 - per_side_credit_call × 100 ≤
+      max_loss_usd_per_side AND POP_call ≥ pop_threshold.
+      Pick HIGHEST K' satisfying both.
+
+  put_side:
+    short_put_walk: >
+      Walk UP from lowest strikes (mirror of call walk). For each K,
+      gap(K) = ask(K) - bid(K_down) where K_down = K - strike_spacing.
+      Continue while gap < strike_width. Pick HIGHEST K satisfying —
+      this is the SHORT put strike.
+    long_put_walk: >
+      Walk DOWN from short_put_K - strike_spacing. Mirror of long
+      call walk subject to put-side max-loss and POP.
+
+  pop_definition: >
+    POP for iron condor = probability of expiring profitable =
+    P(short_put_breakeven ≤ S_T ≤ short_call_breakeven) where
+    short_call_breakeven = short_call_K + net_credit and
+    short_put_breakeven = short_put_K - net_credit. Computed as
+    N(d2_call) - N(d2_put) using BS with VIX-as-IV.
+
+risk_management:
+  max_loss_usd_per_side: 500.0  # cap on (wing_width × 100) - credit per side
+  max_loss_usd_total: 1000.0    # combined cap (call + put sides)
+  pop_threshold: 0.55           # min combined POP to enter
+  strike_width_dollar_threshold: 5.0  # gap criterion threshold (in $)
+  strike_spacing: 5.0           # SPX standard
+  contracts_per_trade: 1
+  multiplier_per_contract: 100.0
+  monthly_max_loss_usd: 1000.0  # stop trading for the rest of the month
+
+  stop_loss:
+    enabled: false
+    rationale: >
+      v6 (PR #68) showed the breakeven stop on a bull call spread
+      converts ~79% of trades to losses by closing at MKT (bid-ask
+      cost on 4 legs). For a vertical bull call spread there is no
+      "other leg" to offset the close cost. For an iron condor, the
+      untested side IS the offset — but only at expiry, not at MKT
+      close. Closing the entire IC at MKT mid-day eats all 4 legs'
+      bid-ask, which is worse than letting the tested side run to
+      max loss while the untested side keeps full premium.
+      Therefore: NO stop loss in v7. The wing widths cap loss; the
+      monthly cap caps the cumulative.
+
+synthetic_pricing:
+  iv_atm_source: prior-day VIX close / 100
+  skew_model: log_moneyness_linear
+  skew_strength_calls: -0.3   # slight downward call skew
+  skew_strength_puts: +0.5    # stronger upward put skew (typical SPX)
+  bid_ask_pct_atm: 0.05        # 5% half-spread at ATM
+  bid_ask_pct_far: 0.30        # 30% half-spread far OTM
+  bid_ask_min: 0.05
+  risk_free_rate: 0.05
+  caveats:
+    - "BS pricing approximates real chain; smile + skew are
+      simplifications. Real fills could be marginally better or
+      worse than these synthetic mids."
+    - "VIX as 1-day IV is a convention; 0DTE IV often slightly
+      different, especially around events."
+    - "Bid-ask model is conservative for far-OTM (real spreads vary
+      with liquidity). Net effect on -$XK conclusion is small at
+      decision-relevant magnitudes."
+
+decision_rules:
+  train_continue_if:
+    - train_total_pnl > 0
+    - train_n_traded ≥ 30  # enough for meaningful inference
+    - train_t_stat > 1.5
+    - train_no_single_day > 50%_of_aggregate_mean
+
+  train_kill_if:
+    - train_total_pnl ≤ 0
+    - train_t_stat < 0
+    - train_one_outlier_explains > 75%_of_mean
+
+  validation_continue_if:
+    - validation_total_pnl > 0
+    - validation_t_stat > 1.0
+    - validation_ci_low_95 > -0.5 × train_total_pnl_per_trade
+
+  holdout_continue_if:
+    - holdout_total_pnl > 0
+    - holdout_t_stat ≥ 1.5
+    - holdout_no_single_day > 60%_of_mean
+
+outputs:
+  train_report_path: research/reports/v7-iron-condor-train.md
+  train_ledger_path: research/reports/v7-iron-condor-train-ledger.csv
+  full_report_path: research/reports/v7-iron-condor-full-window.md
+  full_ledger_path: research/reports/v7-iron-condor-full-window-ledger.csv
+
+notes:
+  - This spec is frozen at the start of testing. Any parameter
+    change requires creating v8 (and treating prior holdout
+    conclusions as non-transferable).
+  - The 60mo train/val/holdout split is reused from v6; same dates.
+  - Microstructure caveats (real chain bid/ask not simulated) apply
+    to every metric here. A real trading deployment would either
+    confirm or refute the synthetic findings; only paper trading or
+    real chain data resolve this fully.
