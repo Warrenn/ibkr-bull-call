@@ -1,0 +1,148 @@
+spec_id: directional-edge-v4
+strategy_spec_id: v4
+phase: directional_edge
+status: frozen_validation_candidate
+parent_spec: directional-edge-v3
+parent_result: KILLED_BY_OUTLIER
+
+question: >
+  Is the mean-reversion candidate found in the v4-combined TRAIN
+  sweep (0.10% threshold by 10:00 ET, low-VIX days, bonds-up days)
+  a real edge or a multiple-comparison artifact?
+
+dataset:
+  version: dataset-v1
+  required_inputs:
+    - es_or_mes_intraday
+    - trading_calendar
+    - event_calendar
+    - vix_daily
+    - tlt_daily
+
+split_policy:
+  train_fraction: 0.6
+  validation_fraction: 0.2
+  holdout_fraction: 0.2
+  holdout_policy: most_recent_untouched_window
+  pinned_in_manifest: true
+
+direction: fade
+direction_rationale: >
+  v4 is a fundamental pivot from the v1-v3 continuation hypothesis.
+  The TRAIN sweep showed a mean-reversion candidate at low threshold
+  + early signal time + low-VIX + bonds-up regime: long would lose
+  -0.18%/trade, fade earns +0.18%/trade. Direction is FADE: the
+  trade is short SPX at signal time, exit at end-of-window.
+
+signal:
+  candidate_id: D4
+  setup_type: bullish_intraday_signal_on_calm_risk_off_day
+  description: >
+    Trigger when (a) prior-day VIX is below TRAIN median (calm regime),
+    AND (b) prior-day TLT had a positive return (bonds rose, yields
+    fell, "risk-off mood"), AND (c) NYSE session has had a small but
+    positive cumulative return by 10:00 ET. Fade the move (short).
+  confirmation_logic: >
+    Cumulative intraday return from session_open_price to
+    signal_time_price must be >= signal_threshold. Prices are taken
+    from the OPEN of the 1-minute bar at each ET timestamp.
+  signal_threshold: 0.0010   # 0.10% — much smaller than v2/v3
+  session_open_time_et: "09:30"
+  earliest_eligible_signal_time_et: "10:00"
+  latest_eligible_signal_time_et: "10:00"
+  rationale: >
+    On TRAIN, this combination produced n=31, mean -0.18%, t=-2.10,
+    p=0.044, 95% CI [-0.351%, -0.005%] — first n>=30, |t|>=2 across
+    v1-v4. Fade hit rate 71%. Coherent story: mismatched signals
+    (small SPX rally + calm vol + risk-off bonds) tend to revert.
+
+event_filter:
+  enabled: true
+  excluded_event_types:
+    - FOMC
+    - CPI
+    - NFP
+    - OPEX
+  source: research/data/dataset-v1/event_calendar.parquet
+  rationale: Carried forward from v2/v3 unchanged.
+
+vix_filter:
+  enabled: true
+  band: low
+  prior_vix_threshold: 14.84
+  threshold_source: >
+    Median of prior-day VIX close on dataset-v1 TRAIN window
+    (2023-05-01 to 2025-02-14). Pinned at v3 freeze; reused here for
+    consistency. "low" = prior-day VIX < 14.84.
+  threshold_pinned_at: "2026-04-30"
+
+bond_filter:
+  enabled: true
+  direction: up
+  source: research/data/dataset-v1/tlt_daily.parquet
+  signal_definition: >
+    "up" = SIGN(close[t-1] - close[t-2]) > 0 — TLT (20+ year Treasury
+    ETF) closed higher on the prior trading day. Treasuries rising =
+    yields falling = "risk-off" or "duration bid". This combined
+    with calm VIX is the regime that produced fade-friendly
+    behavior on TRAIN.
+  rationale: >
+    TRAIN sweep showed bonds_up subset of the candidate had n=31 with
+    mean reversion direction; bonds_down subset had weak continuation
+    (n=22, t=+1.12). The direction asymmetry IS what makes this a
+    real candidate rather than a slicing artifact.
+
+horizon:
+  exit_basis: fixed_same_session_window
+  end_of_window_time_et: "15:55"
+  rationale: Same as v1-v3.
+  underlying_v4: es_front_month
+  pinned_2026_04_30: true
+
+outputs:
+  validation_report_path: research/reports/directional-edge-v4-validation.md
+  validation_ledger_path: research/reports/directional-edge-v4-validation-ledger.csv
+  holdout_report_path: research/reports/directional-edge-v4-holdout.md
+  holdout_ledger_path: research/reports/directional-edge-v4-holdout-ledger.csv
+
+decision_rules:
+  validation_continue_if:
+    - validation_mean_forward_return > 0  # in fade-direction terms
+    - validation_t_stat > 1.0  # relaxed: validation has fewer trades
+    - validation_ci_low_95 > -0.5 * train_mean_in_fade_terms
+    - no_single_day_drives_more_than_60_pct_of_aggregate_mean
+
+  validation_kill_if:
+    - validation_mean_forward_return <= 0
+    - validation_t_stat < 0
+    - one_outlier_explains_more_than_75_pct_of_aggregate_mean
+
+  holdout_continue_if:
+    - holdout_mean_forward_return > 0
+    - holdout_t_stat >= 1.5  # relaxed from 2.0 because n is small
+    - holdout_ci_low_95 > 0
+    - no_single_day_drives_more_than_60_pct_of_aggregate_mean
+  holdout_kill_if:
+    - holdout_mean_forward_return <= 0
+    - holdout_t_stat < 0.5
+
+multiple_comparison_caveat: >
+  CRITICAL CONTEXT: this candidate emerged from a 35-candidate sweep.
+  Bonferroni-adjusted p-value at TRAIN ≈ 1.5 (not significant after
+  multiple-comparison correction). The naive p of 0.044 just barely
+  passes the single-test threshold. The 4-dimensional candidate
+  (threshold × time × VIX × bonds) carries high p-hack risk. We
+  are running this validation with eyes open: a clean kill from
+  validation is the most likely and most informative outcome.
+
+notes:
+  - The "no_single_day > 60%" rule is tightened from v3's 75% because
+    n=31 means each day contributes ~3.2% on average; an outlier
+    contributing >60% would mean ~20× the average, almost certainly
+    a single anomalous day driving the result.
+  - Validation sample expected to be small (~6-12 trades — TRAIN had
+    31 over ~22 months of full days, so 7 months of validation
+    yields ~10 ± 3).
+  - If validation gives an inconclusive (neither continue nor kill)
+    result, the spec freeze is preserved but holdout is NOT
+    automatically run. Operator decides.
