@@ -74,21 +74,23 @@ def stream_ticks(
 
     last_yield: dt.datetime | None = None
     while True:
-        now = dt.datetime.now(dt.timezone.utc)
-        if now >= close_utc:
+        if dt.datetime.now(dt.timezone.utc) >= close_utc:
             return
         try:
             raw = accessor.get(block=True, timeout=poll_timeout_s)
         except queue.Empty:
-            # No message at all this poll; consider emitting a silence tick.
+            # No message this poll. Sample ``now`` AFTER the block so the
+            # silence accounting reflects actual wall-clock elapsed time —
+            # capturing it pre-block undercounts by up to ``poll_timeout_s``.
+            now = dt.datetime.now(dt.timezone.utc)
             if last_yield is None or (now - last_yield).total_seconds() >= silence_emit_interval_s:
                 last_yield = now
                 yield None, now
             continue
         spot = _spot_from_message(raw)
         if spot is None:
-            # Junk/heartbeat — also consider emitting a silence tick if we've
-            # been quiet long enough on real prices.
+            # Junk/heartbeat — same post-block sampling rule as above.
+            now = dt.datetime.now(dt.timezone.utc)
             if last_yield is None or (now - last_yield).total_seconds() >= silence_emit_interval_s:
                 last_yield = now
                 yield None, now

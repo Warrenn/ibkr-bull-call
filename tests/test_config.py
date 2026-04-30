@@ -146,6 +146,33 @@ def test_monitoring_quote_grace_overridable(monkeypatch: pytest.MonkeyPatch) -> 
     assert s.monitoring_quote_max_blind_sec == 120
 
 
+def test_monitoring_max_blind_must_be_at_least_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If max_blind_sec < grace_sec, the bot would emergency-flatten BEFORE
+    any reconnect attempt fires — silently subverting R23a's intent. Enforce
+    the invariant at config-load time so it can't drift via SSM misconfig."""
+
+    monkeypatch.setenv("MAX_LOSS_USD", "200")
+    monkeypatch.setenv("MONITORING_QUOTE_GRACE_SEC", "60")
+    monkeypatch.setenv("MONITORING_QUOTE_MAX_BLIND_SEC", "30")
+    with pytest.raises(ValueError, match="MONITORING_QUOTE_MAX_BLIND_SEC"):
+        load_settings()
+
+
+def test_monitoring_max_blind_equal_to_grace_is_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Equality is fine: the first reconnect attempt fires at exactly
+    grace_sec, and the same instant the emergency flatten triggers if no
+    recovery happened."""
+
+    monkeypatch.setenv("MAX_LOSS_USD", "200")
+    monkeypatch.setenv("MONITORING_QUOTE_GRACE_SEC", "30")
+    monkeypatch.setenv("MONITORING_QUOTE_MAX_BLIND_SEC", "30")
+    s = load_settings()
+    assert s.monitoring_quote_grace_sec == 30
+    assert s.monitoring_quote_max_blind_sec == 30
+
+
 def test_settings_is_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MAX_LOSS_USD", "200")
     s = load_settings()
