@@ -208,6 +208,110 @@ def test_stream_stops_at_close_utc() -> None:
     assert out == []
 
 
+# ---------- _spot_from_message + _to_float helpers --------------------------
+
+
+def test_spot_from_message_dict_with_last() -> None:
+    from bull_call.cpapi.spot import _spot_from_message
+
+    assert _spot_from_message({"31": "5005.0"}) == pytest.approx(5005.0)
+
+
+def test_spot_from_message_dict_with_no_last_uses_midpoint() -> None:
+    from bull_call.cpapi.spot import _spot_from_message
+
+    spot = _spot_from_message({"84": "5004.0", "86": "5006.0"})
+    assert spot == pytest.approx(5005.0)  # mean of bid+ask
+
+
+def test_spot_from_message_dict_with_only_bid() -> None:
+    """Missing ask but valid bid — fall back to bid alone."""
+
+    from bull_call.cpapi.spot import _spot_from_message
+
+    spot = _spot_from_message({"84": "5004.50"})
+    assert spot == pytest.approx(5004.50)
+
+
+def test_spot_from_message_dict_with_no_usable_fields() -> None:
+    from bull_call.cpapi.spot import _spot_from_message
+
+    assert _spot_from_message({}) is None
+    assert _spot_from_message({"99": "value"}) is None
+    assert _spot_from_message({"31": "0", "84": "0", "86": "0"}) is None
+
+
+def test_spot_from_message_decodes_json_string() -> None:
+    """ibind sometimes delivers raw JSON strings instead of dicts —
+    decode and treat the same as a dict."""
+
+    from bull_call.cpapi.spot import _spot_from_message
+
+    spot = _spot_from_message('{"31": "5005.5"}')
+    assert spot == pytest.approx(5005.5)
+
+
+def test_spot_from_message_decodes_json_bytes() -> None:
+    from bull_call.cpapi.spot import _spot_from_message
+
+    spot = _spot_from_message(b'{"31": "5005.5"}')
+    assert spot == pytest.approx(5005.5)
+
+
+def test_spot_from_message_returns_none_for_invalid_json_string() -> None:
+    from bull_call.cpapi.spot import _spot_from_message
+
+    assert _spot_from_message("not json at all") is None
+    assert _spot_from_message(b"\xfe\xff invalid") is None
+
+
+def test_spot_from_message_returns_none_for_non_dict_json() -> None:
+    """A JSON list or scalar — not a dict — is unusable."""
+
+    from bull_call.cpapi.spot import _spot_from_message
+
+    assert _spot_from_message("[1, 2, 3]") is None
+    assert _spot_from_message('"just a string"') is None
+    assert _spot_from_message("42") is None
+
+
+def test_spot_from_message_returns_none_for_unsupported_type() -> None:
+    from bull_call.cpapi.spot import _spot_from_message
+
+    assert _spot_from_message(None) is None
+    assert _spot_from_message(123) is None
+    assert _spot_from_message([1, 2, 3]) is None
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (None, "nan"),
+        (5.5, 5.5),
+        (5, 5.0),
+        ("5005.0", 5005.0),
+        ("5,005.50", 5005.50),    # comma-separated
+        # IBKR's C/H/K/% suffixes (close / halt / thousands / percent)
+        # all stripped via the same .rstrip("CHK%") call.
+        ("5.5C", 5.5),
+        ("5.5H", 5.5),
+        ("5.5K", 5.5),
+        ("5.5%", 5.5),
+        ("nope", "nan"),           # non-numeric string
+        (object(), "nan"),         # unsupported type
+    ],
+)
+def test_to_float(value: Any, expected: Any) -> None:
+    from bull_call.cpapi.spot import _to_float
+
+    result = _to_float(value)
+    if expected == "nan":
+        import math
+        assert math.isnan(result)
+    else:
+        assert result == pytest.approx(expected)
+
+
 def test_stream_returns_without_blocking_when_close_already_passed() -> None:
     """Regression: the loop must check close_utc BEFORE the blocking get(),
     so a stream started after the session has ended doesn't waste one full
