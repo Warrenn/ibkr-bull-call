@@ -173,6 +173,89 @@ def test_monitoring_max_blind_equal_to_grace_is_allowed(
     assert s.monitoring_quote_max_blind_sec == 30
 
 
+# ---------- cross-field validation ------------------------------------------
+
+
+def test_entry_deadline_must_be_after_entry_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If the deadline is at or before the entry time, the bot would never
+    submit any entries — almost certainly a misconfiguration."""
+
+    monkeypatch.setenv("MAX_LOSS_USD", "200")
+    monkeypatch.setenv("ENTRY_TIME_ET", "12:00")
+    monkeypatch.setenv("ENTRY_DEADLINE_ET", "10:30")
+    with pytest.raises(ValueError, match="ENTRY_DEADLINE_ET"):
+        load_settings()
+
+
+def test_entry_deadline_equal_to_entry_time_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MAX_LOSS_USD", "200")
+    monkeypatch.setenv("ENTRY_TIME_ET", "10:30")
+    monkeypatch.setenv("ENTRY_DEADLINE_ET", "10:30")
+    with pytest.raises(ValueError, match="ENTRY_DEADLINE_ET"):
+        load_settings()
+
+
+@pytest.mark.parametrize("value", ["-0.01", "1.01", "1.5", "-1.0"])
+def test_pop_threshold_out_of_range_rejected(
+    monkeypatch: pytest.MonkeyPatch, value: str,
+) -> None:
+    """POP is a probability — values outside [0, 1] are nonsensical."""
+
+    monkeypatch.setenv("MAX_LOSS_USD", "200")
+    monkeypatch.setenv("POP_THRESHOLD", value)
+    with pytest.raises(ValueError, match="POP_THRESHOLD"):
+        load_settings()
+
+
+@pytest.mark.parametrize("value", ["0", "-100", "-0.5"])
+def test_max_loss_usd_must_be_positive(
+    monkeypatch: pytest.MonkeyPatch, value: str,
+) -> None:
+    """A non-positive max loss makes no spread selectable."""
+
+    monkeypatch.setenv("MAX_LOSS_USD", value)
+    with pytest.raises(ValueError, match="MAX_LOSS_USD"):
+        load_settings()
+
+
+@pytest.mark.parametrize(
+    "var,value", [
+        ("ENTRY_TIMEOUT_SEC", "0"),
+        ("ENTRY_TIMEOUT_SEC", "-30"),
+        ("LEG_FILL_TIMEOUT_SEC", "0"),
+        ("LEG_FILL_TIMEOUT_SEC", "-1"),
+        ("STOP_LATEST_SEC", "-1"),
+        ("MONITORING_QUOTE_GRACE_SEC", "-5"),
+        ("MONITORING_RECONNECT_MAX_ATTEMPTS", "-1"),
+        ("MONITORING_QUOTE_MAX_BLIND_SEC", "-10"),
+    ],
+)
+def test_non_negative_int_settings(
+    monkeypatch: pytest.MonkeyPatch, var: str, value: str,
+) -> None:
+    """Various time/count settings must be non-negative (or strictly positive
+    for timeouts that would short-circuit immediately at zero)."""
+
+    monkeypatch.setenv("MAX_LOSS_USD", "200")
+    monkeypatch.setenv(var, value)
+    with pytest.raises(ValueError, match=var):
+        load_settings()
+
+
+def test_min_profit_to_loss_ratio_rejects_negative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Strict negative ratio is meaningless. Zero/empty fall through to
+    'no constraint' as documented."""
+
+    monkeypatch.setenv("MAX_LOSS_USD", "200")
+    monkeypatch.setenv("MIN_PROFIT_TO_LOSS_RATIO", "-0.05")
+    with pytest.raises(ValueError, match="MIN_PROFIT_TO_LOSS_RATIO"):
+        load_settings()
+
+
 def test_settings_is_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MAX_LOSS_USD", "200")
     s = load_settings()
