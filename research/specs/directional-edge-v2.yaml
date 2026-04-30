@@ -1,0 +1,123 @@
+spec_id: directional-edge-v2
+strategy_spec_id: v2
+phase: directional_edge
+status: frozen_validation_candidate
+parent_spec: directional-edge-v1
+parent_result: EDGE_INCONCLUSIVE_NO_EDGE_AFTER_FALSIFICATION
+
+question: >
+  Does bullish intraday continuation (0.50% threshold by 10:30 ET)
+  on non-event days have standalone same-session edge sufficient to
+  justify Phase 2 expression-comparison work?
+
+dataset:
+  version: dataset-v1
+  required_inputs:
+    - es_or_mes_intraday
+    - trading_calendar
+    - event_calendar
+
+split_policy:
+  train_fraction: 0.6
+  validation_fraction: 0.2
+  holdout_fraction: 0.2
+  holdout_policy: most_recent_untouched_window
+  pinned_in_manifest: true
+
+signal:
+  candidate_id: D2
+  setup_type: bullish_intraday_continuation
+  description: >
+    One bullish continuation signal opportunity per eligible session
+    (NYSE full-trading day, NOT an event day). Implementation must
+    record entered=false and skip_reason=no_signal when the
+    confirmation return falls short, OR skip_reason=event_day when
+    the session falls on an excluded event.
+  confirmation_logic: >
+    Cumulative intraday return from session_open_price to
+    signal_time_price must be >= signal_threshold. Prices are taken
+    from the OPEN of the 1-minute bar at each ET timestamp.
+  signal_threshold: 0.0050  # 0.50% open-to-10:30 cumulative return (was 0.0025 in v1)
+  session_open_time_et: "09:30"
+  earliest_eligible_signal_time_et: "10:30"
+  latest_eligible_signal_time_et: "10:30"
+  rationale: >
+    The 0.50% threshold at 10:30 ET emerged from the v2 TRAIN sweep
+    (PR #57) as the only candidate where event-filtered TRAIN data
+    showed t-stat >= 2 with positive per-year stability. v1's 0.25%
+    threshold remained inconclusive even after event filter. Higher
+    thresholds (0.75%) had too few trades for meaningful inference.
+
+event_filter:
+  enabled: true
+  excluded_event_types:
+    - FOMC
+    - CPI
+    - NFP
+    - OPEX
+  source: research/data/dataset-v1/event_calendar.parquet
+  rationale: >
+    Phase 1 v1 event-filter sweep showed event days averaged ~-0.65%
+    per day for the 0.50%/10:30 candidate — the worst tail of the
+    distribution. Excluding them flipped t-stat from +0.53 to +2.92.
+    The four excluded categories cover the major macro release days
+    (FOMC rate decisions, CPI inflation prints, NFP employment,
+    OPEX monthly options expiry).
+
+horizon:
+  exit_basis: fixed_same_session_window
+  end_of_window_time_et: "15:55"
+  rationale: >
+    Same as v1: 15:55 ET avoids the closing-auction print noise
+    without giving up much of the directional move.
+  underlying_v2: es_front_month
+  underlying_v2_rationale: >
+    Same as v1: SPX is TBD per data-acquisition-decision; ES
+    front-month is a valid proxy intraday (~0.99 correlation).
+    Cross-validation against SPX is a follow-up if v2 holdout passes.
+  pinned_2026_04_30: true
+
+outputs:
+  validation_report_path: research/reports/directional-edge-v2-validation.md
+  validation_ledger_path: research/reports/directional-edge-v2-validation-ledger.csv
+  holdout_report_path: research/reports/directional-edge-v2-holdout.md
+  holdout_ledger_path: research/reports/directional-edge-v2-holdout-ledger.csv
+  required_metrics:
+    - trade_count
+    - entered_vs_skipped
+    - mean_forward_return
+    - median_forward_return
+    - hit_rate
+    - left_tail_loss
+    - t_stat
+    - p_value
+    - ci_low_95
+    - ci_high_95
+    - per_year_breakdown
+
+decision_rules:
+  validation_continue_if:
+    - validation_mean_forward_return > 0
+    - validation_t_stat > 1.5  # relaxed from 2.0 because validation has fewer trades
+    - validation_ci_low_95 > -0.5 * train_mean  # CI lower bound not catastrophically below TRAIN mean
+    - per_year_breakdown_validation_not_concentrated_in_a_single_2-week_window
+  validation_kill_if:
+    - validation_mean_forward_return <= 0
+    - validation_t_stat < 0  # negative t — clearly no edge
+    - validation_ci_excludes_train_ci_entirely  # statistical incompatibility with TRAIN result
+
+  holdout_continue_if:
+    - holdout_mean_forward_return > 0
+    - holdout_t_stat >= 2.0
+    - holdout_ci_low_95 > 0  # CI excludes zero — confirmed edge
+  holdout_kill_if:
+    - holdout_mean_forward_return <= 0
+    - holdout_t_stat < 1.5
+
+notes:
+  - This phase does not use options structure (Phase 2 territory).
+  - This phase should kill the bullish-continuation hypothesis if
+    even the event-filtered, threshold-tuned setup fails on
+    out-of-sample data.
+  - Validation result is one-shot; if v2 changes after seeing
+    validation, create v3 and start over.

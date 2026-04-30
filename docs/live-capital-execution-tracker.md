@@ -88,11 +88,25 @@ These are the items worth doing immediately.
   See `research/reports/directional-edge-v1.md` for the full report
   with statistical context and per-year breakdown.**
 
-- [ ] Decide whether to continue based on the directional test before building
+- [x] Decide whether to continue based on the directional test before building
   more machinery.
   Exit:
   `NO EDGE` -> stop and simplify or kill the project.
   `EDGE PRESENT` -> move to `NEXT`.
+  **Status: DONE 2026-04-30 — verdict NO_EDGE.**
+  v1 returned `EDGE_INCONCLUSIVE` (mean +0.07%, t=0.88, CI includes
+  zero). v1 grid sweep on TRAIN found no candidate with t≥2 at
+  meaningful sample size. v2 (0.50%/10:30 + event filter) shaped on
+  TRAIN showed promising signal (t=2.92) but VALIDATION (one-shot
+  per spec discipline) returned t=1.09 with the +0.84% mean driven
+  entirely by a single 2025-04-09 outlier (+9.05% — "tariff pause"
+  rally day). Excluding that outlier, validation mean drops to
+  ~+0.10% — same flat pattern as v1. v2 fails its own
+  `validation_continue_if` rules; does NOT advance to holdout.
+  See `docs/STRATEGY-SPEC-v2.md`,
+  `research/reports/directional-edge-v2-validation.md`. The
+  bullish-continuation hypothesis is killed. Project either pivots
+  to a different signal family (v3) or stops.
 
 ## NEXT
 

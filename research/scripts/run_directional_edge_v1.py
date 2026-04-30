@@ -288,8 +288,9 @@ def format_report(
     else:
         nuanced = metrics.verdict
 
+    strategy_spec_id = spec.get("strategy_spec_id", "v1")
     lines = [
-        "# Directional Edge v1 — Phase 1 Falsification Test",
+        f"# Directional Edge {strategy_spec_id} — Phase 1 Falsification Test",
         "",
         f"**Simple verdict (mean > 0?): `{metrics.verdict}`**",
         "",
@@ -297,7 +298,7 @@ def format_report(
         "",
         "## Provenance",
         "",
-        f"- strategy_spec_id: `v1`",
+        f"- strategy_spec_id: `{strategy_spec_id}`",
         f"- spec_id: `{spec['spec_id']}`",
         f"- dataset_version: `{spec['dataset']['version']}`",
         f"- code_revision: `{code_revision}`",
@@ -417,11 +418,35 @@ def run(
     output_report: Path,
     output_ledger: Path,
     code_revision: str,
+    window_start: dt.date | None = None,
+    window_end: dt.date | None = None,
+    event_calendar_path: Path | None = None,
 ) -> DirectionalEdgeResult:
+    """Run a directional-edge spec on a (possibly-filtered) calendar window.
+
+    Defaults (no window args, no event calendar) reproduce the original
+    v1 evidence: full dataset, no event filter. v1's ledger sha256 is
+    therefore preserved across this signature extension.
+
+    For v2 use, pass:
+    - ``window_start`` / ``window_end`` to restrict to a split window
+      (e.g. validation = 2025-02-18 → 2025-09-22)
+    - ``event_calendar_path`` to drop FOMC / CPI / NFP / OPEX days
+    """
+
     spec = yaml.safe_load(spec_path.read_text())
 
     bars = _load_bars_parquet(es_path)
     cal = pd.read_parquet(calendar_path)
+
+    if window_start is not None:
+        cal = cal[cal["date"] >= window_start]
+    if window_end is not None:
+        cal = cal[cal["date"] <= window_end]
+    if event_calendar_path is not None:
+        events = pd.read_parquet(event_calendar_path)
+        excluded = set(events["date"].tolist())
+        cal = cal[~cal["date"].isin(excluded)]
 
     sig = spec["signal"]
     horiz = spec["horizon"]
@@ -483,6 +508,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    default=Path("research/reports/directional-edge-v1-ledger.csv"))
     p.add_argument("--code-revision", default="HEAD",
                    help="Git revision (sha or symbolic) to record in the report")
+    p.add_argument("--window-start", type=dt.date.fromisoformat, default=None,
+                   help="Optional inclusive start date — restricts to a split window")
+    p.add_argument("--window-end", type=dt.date.fromisoformat, default=None,
+                   help="Optional inclusive end date — restricts to a split window")
+    p.add_argument("--event-calendar", type=Path, default=None,
+                   help="Optional event_calendar.parquet — dates listed are "
+                        "excluded from eligibility (v2 event-filter)")
     return p.parse_args(argv)
 
 
@@ -499,6 +531,9 @@ def main(argv: list[str] | None = None) -> int:
         output_report=args.report,
         output_ledger=args.ledger,
         code_revision=args.code_revision,
+        window_start=args.window_start,
+        window_end=args.window_end,
+        event_calendar_path=args.event_calendar,
     )
     print(f"verdict: {result.metrics.verdict}")
     print(f"trade_count: {result.metrics.trade_count}")
