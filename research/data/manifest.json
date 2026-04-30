@@ -205,17 +205,18 @@
       },
       "resolution": "daily",
       "date_range": {
-        "start": "2023-04-30",
+        "start": "2021-04-30",
         "end": "2026-04-30"
       },
-      "row_count": 132,
+      "row_count": 219,
       "event_type_counts": {
-        "FOMC": 25,
-        "CPI": 35,
-        "NFP": 36,
-        "OPEX": 36
+        "FOMC": 40,
+        "CPI": 59,
+        "NFP": 60,
+        "OPEX": 60
       },
-      "checksum": "sha256:030c900436ce54d22828b0d9d6891378e53fd46601b62627bbdfc01955144b13",
+      "prior_36mo_checksum": "sha256:030c900436ce54d22828b0d9d6891378e53fd46601b62627bbdfc01955144b13",
+      "checksum": "sha256:439706cdffb410f321b26a86f0ca5d28211ec09a84eb0eac2e971b0956080cff",
       "schema": [
         "date",
         "event_type"
