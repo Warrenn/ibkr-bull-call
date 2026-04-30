@@ -42,15 +42,21 @@ class SleepingEmptyAccessor:
     """Each .get() sleeps for ``sleep_s`` then raises queue.Empty.
 
     Used to verify that ``stream_ticks`` measures wall-clock elapsed time
-    AFTER the blocking call, not before it.
+    AFTER the blocking call, not before it. We assert the production code
+    calls ``get(block=True, timeout=...)`` so the contract is locked in
+    addition to being exercised — the params are not just style decoration.
     """
 
     def __init__(self, sleep_s: float, max_calls: int) -> None:
         self._sleep_s = sleep_s
         self._max_calls = max_calls
         self._calls = 0
+        self.observed_calls: list[tuple[bool, float]] = []
 
     def get(self, *, block: bool, timeout: float) -> Any:
+        self.observed_calls.append((block, timeout))
+        assert block is True, "stream_ticks must call get with block=True"
+        assert timeout > 0, "stream_ticks must pass a positive poll timeout"
         self._calls += 1
         if self._calls > self._max_calls:
             raise queue.Empty
@@ -143,18 +149,23 @@ def test_silence_sentinel_timestamp_reflects_post_block_wall_clock() -> None:
     undercounts ``blind_sec`` by the same amount, delaying R23a's emergency
     flatten beyond the configured budget.
 
-    Here we sleep 100ms inside ``get()`` and assert the sentinel's timestamp
-    has moved forward by at least ~90ms relative to wall-clock at the start
-    of the call. The buggy code would yield a timestamp essentially equal
-    to the pre-block ``now``, i.e. ~0ms after ``wall_before``.
+    Here we sleep 200ms inside ``get()`` and assert the sentinel's
+    timestamp has moved forward by at least 50ms relative to wall-clock at
+    the start of the call. The bug is binary — buggy code yields a
+    timestamp within microseconds of ``wall_before`` (so ~0ms elapsed),
+    fixed code yields ~200ms. The 50ms threshold gives ample margin for
+    scheduler jitter on slow CI runners while still definitively
+    distinguishing the two regimes.
     """
 
-    accessor = SleepingEmptyAccessor(sleep_s=0.1, max_calls=5)
+    sleep_s = 0.2
+    threshold_s = 0.05  # generous margin: bug yields ~0ms, fix yields ~200ms
+    accessor = SleepingEmptyAccessor(sleep_s=sleep_s, max_calls=5)
     close_utc = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=10)
 
     stream = stream_ticks(
         accessor, close_utc=close_utc,
-        poll_timeout_s=0.1, silence_emit_interval_s=0.0,
+        poll_timeout_s=sleep_s + 0.1, silence_emit_interval_s=0.0,
     )
 
     wall_before = dt.datetime.now(dt.timezone.utc)
@@ -165,11 +176,17 @@ def test_silence_sentinel_timestamp_reflects_post_block_wall_clock() -> None:
     spot, ts = out[0]
     assert spot is None
     elapsed_to_ts = (ts - wall_before).total_seconds()
-    assert elapsed_to_ts >= 0.09, (
+    assert elapsed_to_ts >= threshold_s, (
         f"silence sentinel timestamp is stale: {elapsed_to_ts:.4f}s after "
-        f"wall_before, but the get() blocked for ~0.1s before raising Empty"
+        f"wall_before, but the get() blocked for ~{sleep_s}s before raising "
+        f"Empty (threshold={threshold_s}s)"
     )
     assert ts <= wall_after, "sentinel timestamp must not be in the future"
+    # Lock the contract: stream_ticks calls get(block=True, timeout>0).
+    assert accessor.observed_calls, "stream_ticks did not call accessor.get"
+    block, timeout_arg = accessor.observed_calls[0]
+    assert block is True
+    assert timeout_arg > 0
 
 
 def test_stream_stops_at_close_utc() -> None:
