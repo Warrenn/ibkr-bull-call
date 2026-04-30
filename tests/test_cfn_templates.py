@@ -104,3 +104,60 @@ def test_artifacts_bucket_has_versioning_enabled() -> None:
     bucket = template["Resources"]["ArtifactsBucket"]
     versioning = bucket["Properties"]["VersioningConfiguration"]
     assert versioning["Status"] == "Enabled"
+
+
+def test_research_data_bucket_retained_on_stack_delete() -> None:
+    """Research data is expensive to re-acquire (Databento PAYG charges
+    real money against the account credit). A stack delete must NOT
+    take the cached artifacts with it."""
+
+    template = _load("data-research.yaml")
+    bucket = template["Resources"]["ResearchDataBucket"]
+
+    assert bucket.get("DeletionPolicy") == "Retain", (
+        "ResearchDataBucket must have DeletionPolicy: Retain — otherwise "
+        "a stack delete would wipe paid-for Databento data and force a re-pull."
+    )
+    assert bucket.get("UpdateReplacePolicy") == "Retain", (
+        "ResearchDataBucket must have UpdateReplacePolicy: Retain — otherwise "
+        "a logical-id rename would wipe paid-for Databento data."
+    )
+
+
+def test_research_data_bucket_has_versioning_enabled() -> None:
+    """Versioning protects against accidental overwrite of a
+    sha256-pinned manifest artifact (the upload script refuses to
+    overwrite, but a manual ``aws s3 cp --force`` would still go
+    through; versioning means the prior version is recoverable)."""
+
+    template = _load("data-research.yaml")
+    bucket = template["Resources"]["ResearchDataBucket"]
+    versioning = bucket["Properties"]["VersioningConfiguration"]
+    assert versioning["Status"] == "Enabled"
+
+
+def test_research_data_bucket_blocks_public_access() -> None:
+    """Research data is project-private; not configured for public
+    distribution. All four block-public-access flags must be true."""
+
+    template = _load("data-research.yaml")
+    bucket = template["Resources"]["ResearchDataBucket"]
+    pab = bucket["Properties"]["PublicAccessBlockConfiguration"]
+    assert pab["BlockPublicAcls"] is True
+    assert pab["BlockPublicPolicy"] is True
+    assert pab["IgnorePublicAcls"] is True
+    assert pab["RestrictPublicBuckets"] is True
+
+
+def test_research_data_bucket_encrypted_at_rest() -> None:
+    """Encryption at rest is required for any bucket holding paid
+    market data (vendor licensing and basic data hygiene)."""
+
+    template = _load("data-research.yaml")
+    bucket = template["Resources"]["ResearchDataBucket"]
+    enc = bucket["Properties"]["BucketEncryption"]
+    sse_rules = enc["ServerSideEncryptionConfiguration"]
+    assert any(
+        r["ServerSideEncryptionByDefault"]["SSEAlgorithm"] == "AES256"
+        for r in sse_rules
+    ), "ResearchDataBucket must have AES256 server-side encryption enabled"

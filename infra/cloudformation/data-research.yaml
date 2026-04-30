@@ -1,0 +1,87 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  ibkr-bull-call research data layer — S3 bucket for research dataset
+  artifacts (parquet files, intermediate analysis outputs) that either
+  don't fit in git or need a single canonical S3 home for
+  collaborators / disaster-recovery re-runs.
+
+  This stack is INDEPENDENT of the trading-bot stacks (data / network /
+  compute). Deploy it once per environment to host research outputs.
+  The trading bot does not depend on this bucket; it is purely for
+  research reproducibility — re-pulling a Databento dataset costs real
+  money against the account credit, so we cache here as a backup to
+  the git-committed artifacts.
+
+  Deploy:
+    aws cloudformation deploy \
+      --stack-name bull-call-data-research-{env} \
+      --template-file infra/cloudformation/data-research.yaml \
+      --parameter-overrides Env={env} \
+      --no-fail-on-empty-changeset
+
+Parameters:
+  Env:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, live]
+    Description: Environment prefix (matches existing /dev/* /live/* convention).
+
+Resources:
+
+  # Research-data bucket. Stores parquet artifacts pinned by sha256 in
+  # research/data/manifest.json. Bucket name is
+  # ``bull-call-{env}-research-data-{account}`` so it's globally unique
+  # across accounts.
+  #
+  # Retain on stack delete + retain on logical-id replace:
+  # research data is expensive to re-acquire (Databento PAYG charges
+  # against uncompressed bytes downloaded). A ``cfn delete-stack``
+  # (intentional or accidental) must NOT wipe the cached artifacts.
+  # Operator runs ``aws s3 rb --force`` explicitly to clear the bucket.
+  ResearchDataBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub bull-call-${Env}-research-data-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      # Noncurrent versions (e.g. an accidental overwrite that gets
+      # caught by the upload script's sha256-mismatch guard but ends
+      # up uploaded anyway via a manual override) age out after a year.
+      # Longer than ArtifactsBucket's 90 days because re-acquiring a
+      # Databento dataset is more expensive than re-tarring a release.
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-noncurrent-after-365-days
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 365
+      Tags:
+        - Key: Project
+          Value: ibkr-bull-call
+        - Key: Env
+          Value: !Ref Env
+        - Key: Purpose
+          Value: research-data
+
+Outputs:
+  ResearchDataBucketName:
+    Description: Name of the research-data S3 bucket
+    Value: !Ref ResearchDataBucket
+    Export:
+      Name: !Sub bull-call-${Env}-research-data-bucket
+  ResearchDataBucketArn:
+    Description: ARN of the research-data S3 bucket
+    Value: !GetAtt ResearchDataBucket.Arn
+    Export:
+      Name: !Sub bull-call-${Env}-research-data-bucket-arn
