@@ -148,6 +148,370 @@ def test_initial_price_passthrough_when_midpoint_satisfies_ratio() -> None:
 # ---------- entry timeout default ------------------------------------------
 
 
+# ---------- submit_entry_lmt orchestrator -----------------------------------
+
+
+_LONG = None  # populated below; pytest fixtures would also work
+_SHORT = None
+
+
+def _legs() -> tuple[Any, Any]:
+    """Build a fresh pair of OptionContract legs for entry tests."""
+
+    from bull_call.chain import OptionContract
+    long_leg = OptionContract(strike=4995.0, conid=111, right="C", expiry="20260429")
+    short_leg = OptionContract(strike=5005.0, conid=222, right="C", expiry="20260429")
+    return long_leg, short_leg
+
+
+class _Resp2:
+    def __init__(self, data: Any) -> None:
+        self.data = data
+
+
+def test_submit_entry_lmt_fills_in_phase_1(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Happy path: midpoint LMT fills inside the first phase budget."""
+
+    from bull_call.cpapi import execution
+
+    long_leg, short_leg = _legs()
+    placed: list[Any] = []
+
+    class FakeClient:
+        def place_order(self, *, order_request: Any, answers: Any, account_id: str) -> _Resp2:
+            placed.append(order_request)
+            return _Resp2([{"order_id": "entry-1"}])
+
+        def order_status(self, *, order_id: str) -> _Resp2:
+            return _Resp2({"order_status": "Filled", "average_price": "5.00"})
+
+        def modify_order(self, **_: Any) -> _Resp2:
+            raise AssertionError("phase-1 fill — modify should not be called")
+
+        def cancel_order(self, **_: Any) -> _Resp2:
+            raise AssertionError("phase-1 fill — cancel should not be called")
+
+    monkeypatch.setattr(execution.time, "sleep", lambda _s: None)
+
+    fill = execution.submit_entry_lmt(
+        FakeClient(),  # type: ignore[arg-type]
+        account_id="A1",
+        long_leg=long_leg,
+        short_leg=short_leg,
+        debit_mid=5.00,
+        debit_max=5.20,
+        timeout_s=10.0,
+    )
+    assert fill.filled is True
+    assert fill.avg_fill_price == pytest.approx(5.00)
+    assert fill.order_id == "entry-1"
+    assert len(placed) == 1
+
+
+def test_submit_entry_lmt_reprices_then_fills_in_phase_2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 1 doesn't fill; bot reprices upward and phase 2 fills.
+
+    The phase-1 ``_await_fill`` loop runs as fast as Python can with
+    ``time.sleep`` stubbed, so we can't script statuses by call count.
+    Instead we flip a flag inside ``modify_order`` (which only runs at
+    the phase boundary) — every poll BEFORE that returns Submitted,
+    every poll AFTER returns Filled.
+    """
+
+    from bull_call.cpapi import execution
+
+    long_leg, short_leg = _legs()
+    modified: list[Any] = []
+    phase = {"in_phase_2": False}
+
+    class FakeClient:
+        def place_order(self, *, order_request: Any, answers: Any, account_id: str) -> _Resp2:
+            return _Resp2([{"order_id": "entry-2"}])
+
+        def order_status(self, *, order_id: str) -> _Resp2:
+            if phase["in_phase_2"]:
+                return _Resp2({"order_status": "Filled", "average_price": "5.10"})
+            return _Resp2({"order_status": "Submitted"})
+
+        def modify_order(self, **kw: Any) -> _Resp2:
+            modified.append(kw)
+            phase["in_phase_2"] = True
+            return _Resp2({"ok": True})
+
+        def cancel_order(self, **_: Any) -> _Resp2:
+            raise AssertionError("phase-2 fill — cancel should not be called")
+
+    monkeypatch.setattr(execution.time, "sleep", lambda _s: None)
+
+    fill = execution.submit_entry_lmt(
+        FakeClient(),  # type: ignore[arg-type]
+        account_id="A1",
+        long_leg=long_leg,
+        short_leg=short_leg,
+        debit_mid=5.00,
+        debit_max=5.20,
+        timeout_s=2.0,
+    )
+    assert fill.filled is True
+    assert fill.avg_fill_price == pytest.approx(5.10)
+    assert len(modified) == 1
+
+
+def test_submit_entry_lmt_cancels_when_neither_phase_fills(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both phases time out — order is cancelled and reported unfilled."""
+
+    from bull_call.cpapi import execution
+
+    long_leg, short_leg = _legs()
+    cancel_calls: list[str] = []
+
+    class FakeClient:
+        def place_order(self, *, order_request: Any, answers: Any, account_id: str) -> _Resp2:
+            return _Resp2([{"order_id": "entry-3"}])
+
+        def order_status(self, *, order_id: str) -> _Resp2:
+            return _Resp2({"order_status": "Submitted"})  # never fills
+
+        def modify_order(self, **_: Any) -> _Resp2:
+            return _Resp2({"ok": True})
+
+        def cancel_order(self, *, order_id: str, account_id: str) -> _Resp2:
+            cancel_calls.append(order_id)
+            return _Resp2({"ok": True})
+
+    monkeypatch.setattr(execution.time, "sleep", lambda _s: None)
+
+    fill = execution.submit_entry_lmt(
+        FakeClient(),  # type: ignore[arg-type]
+        account_id="A1",
+        long_leg=long_leg,
+        short_leg=short_leg,
+        debit_mid=5.00,
+        debit_max=5.20,
+        timeout_s=0.5,
+    )
+    assert fill.filled is False
+    assert cancel_calls == ["entry-3"]
+
+
+def test_submit_entry_lmt_shutdown_during_phase_1_cancels_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SIGTERM mid-phase-1 (between polls) — cancel order, exit without
+    bothering with phase 2."""
+
+    from bull_call.cpapi import execution
+
+    long_leg, short_leg = _legs()
+    cancel_calls: list[str] = []
+    modify_calls: list[Any] = []
+
+    class FakeClient:
+        def place_order(self, *, order_request: Any, answers: Any, account_id: str) -> _Resp2:
+            return _Resp2([{"order_id": "entry-4"}])
+
+        def order_status(self, *, order_id: str) -> _Resp2:
+            return _Resp2({"order_status": "Submitted"})
+
+        def modify_order(self, **_: Any) -> _Resp2:
+            modify_calls.append(_)
+            return _Resp2({"ok": True})
+
+        def cancel_order(self, *, order_id: str, account_id: str) -> _Resp2:
+            cancel_calls.append(order_id)
+            return _Resp2({"ok": True})
+
+    monkeypatch.setattr(execution.time, "sleep", lambda _s: None)
+
+    flag = {"stop": True}  # tripped immediately so phase-1 _await_fill exits
+    fill = execution.submit_entry_lmt(
+        FakeClient(),  # type: ignore[arg-type]
+        account_id="A1",
+        long_leg=long_leg,
+        short_leg=short_leg,
+        debit_mid=5.00,
+        debit_max=5.20,
+        timeout_s=10.0,
+        should_stop_fn=lambda: flag["stop"],
+    )
+    assert fill.filled is False
+    assert cancel_calls == ["entry-4"]
+    assert modify_calls == []  # never reached phase 2
+
+
+def test_submit_entry_lmt_swallows_cancel_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If cancel_order itself raises, the wrapper still returns an
+    unfilled FillReport — failure to cancel must not crash the daemon."""
+
+    from bull_call.cpapi import execution
+
+    long_leg, short_leg = _legs()
+
+    class FakeClient:
+        def place_order(self, *, order_request: Any, answers: Any, account_id: str) -> _Resp2:
+            return _Resp2([{"order_id": "entry-5"}])
+
+        def order_status(self, *, order_id: str) -> _Resp2:
+            return _Resp2({"order_status": "Submitted"})
+
+        def modify_order(self, **_: Any) -> _Resp2:
+            return _Resp2({"ok": True})
+
+        def cancel_order(self, **_: Any) -> _Resp2:
+            raise RuntimeError("simulated cancel failure")
+
+    monkeypatch.setattr(execution.time, "sleep", lambda _s: None)
+
+    fill = execution.submit_entry_lmt(
+        FakeClient(),  # type: ignore[arg-type]
+        account_id="A1",
+        long_leg=long_leg,
+        short_leg=short_leg,
+        debit_mid=5.00,
+        debit_max=5.20,
+        timeout_s=0.5,
+    )
+    assert fill.filled is False  # graceful degradation
+
+
+# ---------- flatten_unmatched_leg ------------------------------------------
+
+
+def test_flatten_unmatched_leg_closes_long_when_short_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Long leg filled (+1) but short never showed — flatten the long
+    via a single-leg MKT SELL."""
+
+    from bull_call.chain import OptionContract
+    from bull_call.cpapi import execution
+
+    long_leg = OptionContract(strike=4995.0, conid=111, right="C", expiry="20260429")
+    short_leg = OptionContract(strike=5005.0, conid=222, right="C", expiry="20260429")
+    placed: list[Any] = []
+
+    class FakeClient:
+        def positions_by_conid(self, *, account_id: str, conid: str) -> _Resp2:
+            if int(conid) == 111:
+                return _Resp2([{"position": 1.0}])
+            return _Resp2([])  # short flat
+
+        def place_order(self, *, order_request: Any, answers: Any, account_id: str) -> _Resp2:
+            placed.append(order_request)
+            return _Resp2([{"order_id": "flatten-1"}])
+
+    execution.flatten_unmatched_leg(
+        FakeClient(),  # type: ignore[arg-type]
+        account_id="A1",
+        long_leg=long_leg,
+        short_leg=short_leg,
+    )
+    assert len(placed) == 1
+    order = placed[0]
+    assert order.conid == "111"
+    assert order.side == "SELL"
+    assert order.quantity == 1
+    assert order.order_type == "MKT"
+
+
+def test_flatten_unmatched_leg_closes_short_when_long_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Short leg filled (-1) but long never showed — flatten the short
+    via a single-leg MKT BUY."""
+
+    from bull_call.chain import OptionContract
+    from bull_call.cpapi import execution
+
+    long_leg = OptionContract(strike=4995.0, conid=111, right="C", expiry="20260429")
+    short_leg = OptionContract(strike=5005.0, conid=222, right="C", expiry="20260429")
+    placed: list[Any] = []
+
+    class FakeClient:
+        def positions_by_conid(self, *, account_id: str, conid: str) -> _Resp2:
+            if int(conid) == 222:
+                return _Resp2([{"position": -1.0}])
+            return _Resp2([])  # long flat
+
+        def place_order(self, *, order_request: Any, answers: Any, account_id: str) -> _Resp2:
+            placed.append(order_request)
+            return _Resp2([{"order_id": "flatten-2"}])
+
+    execution.flatten_unmatched_leg(
+        FakeClient(),  # type: ignore[arg-type]
+        account_id="A1",
+        long_leg=long_leg,
+        short_leg=short_leg,
+    )
+    assert len(placed) == 1
+    order = placed[0]
+    assert order.conid == "222"
+    assert order.side == "BUY"  # short was negative; closing it is BUY
+    assert order.quantity == 1
+
+
+def test_flatten_unmatched_leg_no_op_when_balanced() -> None:
+    """Both legs filled cleanly — no order to submit."""
+
+    from bull_call.chain import OptionContract
+    from bull_call.cpapi import execution
+
+    long_leg = OptionContract(strike=4995.0, conid=111, right="C", expiry="20260429")
+    short_leg = OptionContract(strike=5005.0, conid=222, right="C", expiry="20260429")
+    placed: list[Any] = []
+
+    class FakeClient:
+        def positions_by_conid(self, *, account_id: str, conid: str) -> _Resp2:
+            if int(conid) == 111:
+                return _Resp2([{"position": 1.0}])
+            return _Resp2([{"position": -1.0}])
+
+        def place_order(self, **kw: Any) -> _Resp2:
+            placed.append(kw)
+            return _Resp2({})
+
+    execution.flatten_unmatched_leg(
+        FakeClient(),  # type: ignore[arg-type]
+        account_id="A1",
+        long_leg=long_leg,
+        short_leg=short_leg,
+    )
+    assert placed == []
+
+
+def test_flatten_unmatched_leg_no_op_when_both_flat() -> None:
+    """Neither leg has a position — entry never made it through; no-op."""
+
+    from bull_call.chain import OptionContract
+    from bull_call.cpapi import execution
+
+    long_leg = OptionContract(strike=4995.0, conid=111, right="C", expiry="20260429")
+    short_leg = OptionContract(strike=5005.0, conid=222, right="C", expiry="20260429")
+    placed: list[Any] = []
+
+    class FakeClient:
+        def positions_by_conid(self, *, account_id: str, conid: str) -> _Resp2:
+            return _Resp2([])
+
+        def place_order(self, **kw: Any) -> _Resp2:
+            placed.append(kw)
+            return _Resp2({})
+
+    execution.flatten_unmatched_leg(
+        FakeClient(),  # type: ignore[arg-type]
+        account_id="A1",
+        long_leg=long_leg,
+        short_leg=short_leg,
+    )
+    assert placed == []
+
+
 def test_entry_timeout_default_is_5_minutes() -> None:
     """Regression: total budget for the entry order is 5 minutes by default;
     if you want a tighter window, pass ``timeout_s`` explicitly."""
