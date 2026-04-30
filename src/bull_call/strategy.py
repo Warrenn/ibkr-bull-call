@@ -31,6 +31,9 @@ class StopOutcome(Enum):
     SUPPRESSED = auto()   # stop would have fired but in suppression window
     UNECONOMIC = auto()   # stop would have fired but realized loss would exceed
                           # the max-loss-if-held; let it ride to expiry instead
+    OUTAGE_FLATTEN = auto()  # R23a: data feed went silent past max-blind
+                             # window; emergency MKT flatten regardless of
+                             # state (bypasses the uneconomic-credit guard)
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,11 +248,12 @@ def monitor_stop(
     breakeven: float,
     settings: Settings,
     close_utc: dt.datetime,
-    tick_stream: Iterator[tuple[float, dt.datetime]],
+    tick_stream: Iterator[tuple[float | None, dt.datetime]],
     submit_close: SubmitClose,
     estimate_close_credit: EstimateCredit | None = None,
     armed_from_recovery: bool = False,
     should_stop_fn: Callable[[], bool] = lambda: False,
+    reconnect_fn: Callable[[], None] | None = None,
 ) -> StopOutcome:
     """Drive the stop state machine over a stream of (spot, now_utc) ticks.
 
@@ -258,6 +262,22 @@ def monitor_stop(
     promptly — without it, the loop blocks until ``close_utc`` (potentially
     hours) and the daemon refuses to exit. Returns ``StopOutcome.NEVER`` on
     shutdown so the caller treats it as "no stop fired this session."
+
+    The stream may yield ``(None, now_utc)`` "silence" sentinels emitted by
+    the polling layer when no fresh tick arrived within the poll window.
+    These drive R23a (data-outage emergency flatten):
+
+      - If silence persists for ``monitoring_quote_grace_sec`` total, emit
+        ``quote_outage`` once and (if provided) call ``reconnect_fn`` —
+        retried at multiples of grace_sec, capped at
+        ``monitoring_reconnect_max_attempts``.
+      - If silence persists for ``monitoring_quote_max_blind_sec`` total,
+        submit a SELL combo MKT emergency flatten, record the close with
+        ``exit_kind='OUTAGE_FLATTEN'``, and return ``StopOutcome.OUTAGE_FLATTEN``.
+
+    The emergency flatten path bypasses the uneconomic-credit guard
+    (per invariants I3 / I9 in docs/strategy-review.md) — sitting blind
+    on an open 0DTE position is more expensive than a bad MKT fill.
     """
 
     if not settings.stop_enabled:
@@ -274,12 +294,62 @@ def monitor_stop(
         armed_from_recovery=armed_from_recovery,
     )
 
+    grace_sec = float(settings.monitoring_quote_grace_sec)
+    max_blind_sec = float(settings.monitoring_quote_max_blind_sec)
+    max_reconnects = settings.monitoring_reconnect_max_attempts
+    last_fresh_now: dt.datetime | None = None
+    outage_event_emitted = False
+    reconnects_done = 0
+
     for spot, now in tick_stream:
         if should_stop_fn():
             log.info("shutdown requested for spread=%s monitor; exiting", spread_id)
             return StopOutcome.NEVER
         if now >= close_utc:
             return StopOutcome.NEVER
+
+        if spot is None:
+            # Silent sentinel from the poller. Track the outage.
+            if last_fresh_now is None:
+                last_fresh_now = now
+                continue
+            blind_sec = (now - last_fresh_now).total_seconds()
+            if blind_sec >= max_blind_sec:
+                return _emergency_flatten(
+                    store, spread_id=spread_id, now=now,
+                    breakeven=breakeven, blind_sec=blind_sec,
+                    submit_close=submit_close,
+                )
+            if blind_sec >= grace_sec * (reconnects_done + 1) \
+                    and reconnects_done < max_reconnects:
+                if not outage_event_emitted:
+                    outage_event_emitted = True
+                    events.emit(
+                        "quote_outage",
+                        spread_id=spread_id, blind_sec=blind_sec,
+                        breakeven=breakeven,
+                    )
+                    log.warning(
+                        "quote outage on spread=%s; blind_sec=%.1f; "
+                        "starting reconnect attempts",
+                        spread_id, blind_sec,
+                    )
+                if reconnect_fn is not None:
+                    try:
+                        reconnect_fn()
+                    except Exception:
+                        log.warning(
+                            "reconnect attempt failed for spread=%s",
+                            spread_id, exc_info=True,
+                        )
+                reconnects_done += 1
+            continue
+
+        # Fresh tick — reset outage tracking.
+        last_fresh_now = now
+        outage_event_emitted = False
+        reconnects_done = 0
+
         new_state, action = advance(
             state, spot=spot, now=now, close_utc=close_utc,
             latest_sec=settings.stop_latest_sec,
@@ -349,6 +419,40 @@ def monitor_stop(
 
 def _stop_pnl(entry_debit: float, exit_credit: float) -> float:
     return round((exit_credit - entry_debit) * 100.0, 2)
+
+
+def _emergency_flatten(
+    store: Store,
+    *,
+    spread_id: str,
+    now: dt.datetime,
+    breakeven: float,
+    blind_sec: float,
+    submit_close: SubmitClose,
+) -> StopOutcome:
+    """R23a — emergency MKT flatten triggered by a data-feed outage.
+
+    Bypasses the uneconomic-credit guard. Records the close with
+    ``exit_kind='OUTAGE_FLATTEN'`` (mapped to ``status='STOPPED'``).
+    """
+
+    log.error(
+        "data-outage emergency flatten on spread=%s; blind_sec=%.1f",
+        spread_id, blind_sec,
+    )
+    fill = submit_close()
+    pnl = _stop_pnl(store.get_spread(spread_id).debit, fill.avg_fill_price)
+    store.record_close(
+        spread_id=spread_id, closed_at=now.isoformat(),
+        exit_kind="OUTAGE_FLATTEN", pnl=pnl,
+    )
+    events.emit(
+        "spread_closed",
+        spread_id=spread_id, exit_kind="OUTAGE_FLATTEN",
+        reason="data_outage_flatten", blind_sec=blind_sec,
+        close_fill=fill.avg_fill_price, pnl=pnl, breakeven=breakeven,
+    )
+    return StopOutcome.OUTAGE_FLATTEN
 
 
 def settlement_pnl(

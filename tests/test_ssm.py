@@ -124,6 +124,28 @@ def test_fetch_monthly_capital_gate_key_maps(ssm_client: object) -> None:
     assert overrides["MONTHLY_STOP_ON_NEGATIVE_PNL"] == "false"
 
 
+def test_fetch_monitoring_outage_keys_map(ssm_client: object) -> None:
+    """The R23a data-outage settings can be controlled via SSM JSON."""
+
+    settings_value = json.dumps({
+        "maxLossUsd": 250,
+        "monitoringQuoteGraceSec": 20,
+        "monitoringReconnectMaxAttempts": 5,
+        "monitoringQuoteMaxBlindSec": 90,
+    })
+    stubber = Stubber(ssm_client)  # type: ignore[arg-type]
+    stubber.add_response(
+        "get_parameter",
+        {"Parameter": {"Name": "/dev/ibkr-bull-call/settings", "Type": "String", "Value": settings_value}},
+        {"Name": "/dev/ibkr-bull-call/settings", "WithDecryption": False},
+    )
+    with stubber:
+        overrides = fetch_settings_overrides(ssm_client, prefix="/dev/ibkr-bull-call")
+    assert overrides["MONITORING_QUOTE_GRACE_SEC"] == "20"
+    assert overrides["MONITORING_RECONNECT_MAX_ATTEMPTS"] == "5"
+    assert overrides["MONITORING_QUOTE_MAX_BLIND_SEC"] == "90"
+
+
 def test_fetch_unknown_keys_ignored(ssm_client: object) -> None:
     settings_value = json.dumps({"maxLossUsd": 200, "futureKnob": "ignored"})
     stubber = Stubber(ssm_client)  # type: ignore[arg-type]

@@ -57,6 +57,15 @@ class Settings:
     # negative, skip new entries for the rest of the month. Existing positions
     # continue to be managed. Resets at the first session of the next month.
     monthly_stop_on_negative_pnl: bool = True
+    # R23a — open-position data-outage fail-safe.
+    # If the spot tick stream goes silent on an open position for this long,
+    # start reconnect attempts (and emit a quote_outage event).
+    monitoring_quote_grace_sec: int = 15
+    # Up to this many WS reconnects before escalating to emergency flatten.
+    monitoring_reconnect_max_attempts: int = 3
+    # Total blind window since last fresh tick before emergency MKT flatten.
+    # Must be >= monitoring_quote_grace_sec.
+    monitoring_quote_max_blind_sec: int = 60
 
 
 def load_settings(env: dict[str, str] | None = None) -> Settings:
@@ -99,5 +108,14 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         leg_fill_timeout_sec=int(src.get("LEG_FILL_TIMEOUT_SEC", "30")),
         monthly_stop_on_negative_pnl=_parse_bool(
             src.get("MONTHLY_STOP_ON_NEGATIVE_PNL", "true"),
+        ),
+        monitoring_quote_grace_sec=int(
+            src.get("MONITORING_QUOTE_GRACE_SEC", "15"),
+        ),
+        monitoring_reconnect_max_attempts=int(
+            src.get("MONITORING_RECONNECT_MAX_ATTEMPTS", "3"),
+        ),
+        monitoring_quote_max_blind_sec=int(
+            src.get("MONITORING_QUOTE_MAX_BLIND_SEC", "60"),
         ),
     )

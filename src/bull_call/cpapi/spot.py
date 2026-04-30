@@ -58,14 +58,21 @@ def stream_ticks(
     *,
     close_utc: dt.datetime,
     poll_timeout_s: float = 1.0,
-) -> Iterator[tuple[float, dt.datetime]]:
+    silence_emit_interval_s: float = 5.0,
+) -> Iterator[tuple[float | None, dt.datetime]]:
     """Yield (spot, now_utc) for each tick until ``close_utc`` is reached.
 
-    Skips heartbeat/system messages; only yields when a usable price is parsed.
-    Times out the queue every ``poll_timeout_s`` so the caller's loop can also
-    react to wall-clock conditions (e.g. session close).
+    Yields ``(None, now_utc)`` "silence sentinels" when no fresh tick has
+    been seen for ``silence_emit_interval_s`` so the consumer (monitor_stop)
+    can implement R23a data-outage detection without needing a separate
+    watchdog thread.
+
+    Skips heartbeat/system messages; only yields a real price when a usable
+    one is parsed. Times out the queue every ``poll_timeout_s`` so the caller
+    can also react to wall-clock conditions (e.g. session close).
     """
 
+    last_yield: dt.datetime | None = None
     while True:
         now = dt.datetime.now(dt.timezone.utc)
         if now >= close_utc:
@@ -73,11 +80,21 @@ def stream_ticks(
         try:
             raw = accessor.get(block=True, timeout=poll_timeout_s)
         except queue.Empty:
+            # No message at all this poll; consider emitting a silence tick.
+            if last_yield is None or (now - last_yield).total_seconds() >= silence_emit_interval_s:
+                last_yield = now
+                yield None, now
             continue
         spot = _spot_from_message(raw)
         if spot is None:
+            # Junk/heartbeat — also consider emitting a silence tick if we've
+            # been quiet long enough on real prices.
+            if last_yield is None or (now - last_yield).total_seconds() >= silence_emit_interval_s:
+                last_yield = now
+                yield None, now
             continue
-        yield spot, dt.datetime.now(dt.timezone.utc)
+        last_yield = dt.datetime.now(dt.timezone.utc)
+        yield spot, last_yield
 
 
 def _spot_from_message(message: object) -> float | None:

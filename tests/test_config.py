@@ -30,6 +30,10 @@ def test_load_with_defaults_and_required(monkeypatch: pytest.MonkeyPatch) -> Non
     assert s.entry_deadline_et == dt.time(13, 0)  # default = stop at 1 pm ET
     assert s.leg_fill_timeout_sec == 30         # default = 30s leg-out grace
     assert s.monthly_stop_on_negative_pnl is True  # default = capital gate ON
+    # R23a data-outage fail-safe defaults (per strategy-review.md §7):
+    assert s.monitoring_quote_grace_sec == 15
+    assert s.monitoring_reconnect_max_attempts == 3
+    assert s.monitoring_quote_max_blind_sec == 60
 
 
 def test_min_profit_to_loss_ratio_parses(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -129,6 +133,17 @@ def test_monthly_stop_on_negative_pnl_truthy(
     monkeypatch.setenv("MAX_LOSS_USD", "200")
     monkeypatch.setenv("MONTHLY_STOP_ON_NEGATIVE_PNL", value)
     assert load_settings().monthly_stop_on_negative_pnl is True
+
+
+def test_monitoring_quote_grace_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAX_LOSS_USD", "200")
+    monkeypatch.setenv("MONITORING_QUOTE_GRACE_SEC", "30")
+    monkeypatch.setenv("MONITORING_RECONNECT_MAX_ATTEMPTS", "5")
+    monkeypatch.setenv("MONITORING_QUOTE_MAX_BLIND_SEC", "120")
+    s = load_settings()
+    assert s.monitoring_quote_grace_sec == 30
+    assert s.monitoring_reconnect_max_attempts == 5
+    assert s.monitoring_quote_max_blind_sec == 120
 
 
 def test_settings_is_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
