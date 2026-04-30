@@ -52,16 +52,20 @@ _ET = ZoneInfo("America/New_York")
 def _heartbeat_loop(*, interval_s: float, stop_event: threading.Event) -> None:
     """Emit a 'heartbeat' event every ``interval_s`` until ``stop_event`` is set.
 
-    Intended to run in a daemon thread. Returns promptly after stop_event
-    fires (Event.wait honours signals immediately). Each emission goes
-    through ``events.emit`` so it lands as a structured JSON line in
-    CloudWatch — operators can alarm on absence of heartbeat events to
-    detect a frozen daemon during long quiet stretches.
+    Intended to run in a daemon thread. ``Event.wait`` returns True the
+    moment the event fires (so we never wait the full interval after
+    shutdown), or False on timeout. The loop emits only on the False
+    branch — meaning a stop_event that's already set when the thread
+    starts produces zero emissions, exactly the "drain on shutdown"
+    semantics we want.
+
+    Each emission goes through ``events.emit`` so it lands as a
+    structured JSON line in CloudWatch — operators can alarm on the
+    absence of heartbeat events to detect a frozen daemon during long
+    quiet stretches.
     """
 
-    while not stop_event.is_set():
-        if stop_event.wait(timeout=interval_s):
-            return
+    while not stop_event.wait(timeout=interval_s):
         events.emit("heartbeat")
 
 

@@ -127,12 +127,15 @@ def test_heartbeat_emits_at_configured_cadence(
     )
 
 
-def test_heartbeat_exits_immediately_when_stop_already_set() -> None:
+def test_heartbeat_exits_immediately_when_stop_already_set(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """If stop is already set when the thread starts, it should exit
-    without blocking for ``interval_s`` and without emitting any event."""
+    without blocking for ``interval_s`` AND without emitting any event."""
 
     stop_event = threading.Event()
     stop_event.set()
+    caplog.set_level(logging.DEBUG, logger="bull_call.events")
 
     wall_before = time.monotonic()
     thread = threading.Thread(
@@ -147,4 +150,14 @@ def test_heartbeat_exits_immediately_when_stop_already_set() -> None:
     assert not thread.is_alive(), "heartbeat thread did not exit"
     assert elapsed < 0.5, (
         f"heartbeat blocked for {elapsed:.2f}s instead of bailing out"
+    )
+    # The "drain on shutdown" semantics: zero emissions when stop is
+    # set before the first wait() call.
+    heartbeat_records = [
+        r for r in caplog.records
+        if r.name == "bull_call.events" and '"heartbeat"' in r.getMessage()
+    ]
+    assert heartbeat_records == [], (
+        f"expected zero heartbeats when stop is already set; "
+        f"got {len(heartbeat_records)}"
     )

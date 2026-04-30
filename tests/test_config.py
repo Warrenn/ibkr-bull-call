@@ -136,6 +136,17 @@ def test_monthly_stop_on_negative_pnl_truthy(
     assert load_settings().monthly_stop_on_negative_pnl is True
 
 
+def test_heartbeat_interval_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Operators can shorten/lengthen the heartbeat cadence via env / SSM
+    without touching code (e.g. tighter cadence in dev for faster alarm
+    feedback)."""
+
+    monkeypatch.setenv("MAX_LOSS_USD", "200")
+    monkeypatch.setenv("HEARTBEAT_INTERVAL_SEC", "60")
+    s = load_settings()
+    assert s.heartbeat_interval_sec == 60
+
+
 def test_monitoring_quote_grace_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MAX_LOSS_USD", "200")
     monkeypatch.setenv("MONITORING_QUOTE_GRACE_SEC", "30")
