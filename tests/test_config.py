@@ -37,6 +37,7 @@ def test_load_with_defaults_and_required(monkeypatch: pytest.MonkeyPatch) -> Non
     assert s.heartbeat_interval_sec == 300
     assert s.session_error_backoff_sec == 300
     assert s.session_error_max_consecutive == 5
+    assert s.skip_half_days is True
 
 
 def test_min_profit_to_loss_ratio_parses(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -136,6 +137,27 @@ def test_monthly_stop_on_negative_pnl_truthy(
     monkeypatch.setenv("MAX_LOSS_USD", "200")
     monkeypatch.setenv("MONTHLY_STOP_ON_NEGATIVE_PNL", value)
     assert load_settings().monthly_stop_on_negative_pnl is True
+
+
+@pytest.mark.parametrize("value", ["false", "False", "0", "no", "off", ""])
+def test_skip_half_days_can_be_disabled(
+    monkeypatch: pytest.MonkeyPatch, value: str,
+) -> None:
+    """Operators can opt back into half-day trading via env / SSM (e.g. for
+    backtest comparison runs)."""
+
+    monkeypatch.setenv("MAX_LOSS_USD", "200")
+    monkeypatch.setenv("SKIP_HALF_DAYS", value)
+    assert load_settings().skip_half_days is False
+
+
+@pytest.mark.parametrize("value", ["true", "True", "1", "yes", "on"])
+def test_skip_half_days_truthy(
+    monkeypatch: pytest.MonkeyPatch, value: str,
+) -> None:
+    monkeypatch.setenv("MAX_LOSS_USD", "200")
+    monkeypatch.setenv("SKIP_HALF_DAYS", value)
+    assert load_settings().skip_half_days is True
 
 
 def test_heartbeat_interval_overridable(monkeypatch: pytest.MonkeyPatch) -> None:

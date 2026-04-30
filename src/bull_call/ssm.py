@@ -50,6 +50,7 @@ _SETTINGS_KEY_MAP: dict[str, str] = {
     "heartbeatIntervalSec": "HEARTBEAT_INTERVAL_SEC",
     "sessionErrorBackoffSec": "SESSION_ERROR_BACKOFF_SEC",
     "sessionErrorMaxConsecutive": "SESSION_ERROR_MAX_CONSECUTIVE",
+    "skipHalfDays": "SKIP_HALF_DAYS",
 }
 
 

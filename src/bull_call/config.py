@@ -170,6 +170,13 @@ class Settings:
     # that point we're probably stuck on a deeper bug, and a clean restart
     # is the safest path.
     session_error_max_consecutive: int = 5
+    # Skip new entries on NYSE half-days (early 1 pm ET close: e.g. day
+    # after Thanksgiving, Christmas Eve, Independence Day eve). With the
+    # default 13:00 ET deadline coinciding with the half-day close, there
+    # is no execution headroom; the holding window is also half what the
+    # strategy expects. Existing positions still get monitored + settled.
+    # Conservative default per docs/strategy-review.md.
+    skip_half_days: bool = True
 
 
 def load_settings(env: dict[str, str] | None = None) -> Settings:
@@ -233,6 +240,8 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         src, "SESSION_ERROR_MAX_CONSECUTIVE", default=5,
     )
 
+    skip_half_days = _parse_bool(src.get("SKIP_HALF_DAYS", "true"))
+
     entry_time_et = _parse_time(src.get("ENTRY_TIME_ET", "10:30"), "ENTRY_TIME_ET")
     entry_deadline_et = _parse_time(
         src.get("ENTRY_DEADLINE_ET", "13:00"), "ENTRY_DEADLINE_ET",
@@ -270,4 +279,5 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         heartbeat_interval_sec=heartbeat_interval_sec,
         session_error_backoff_sec=session_error_backoff_sec,
         session_error_max_consecutive=session_error_max_consecutive,
+        skip_half_days=skip_half_days,
     )

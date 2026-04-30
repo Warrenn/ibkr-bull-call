@@ -146,6 +146,24 @@ def test_fetch_monitoring_outage_keys_map(ssm_client: object) -> None:
     assert overrides["MONITORING_QUOTE_MAX_BLIND_SEC"] == "90"
 
 
+def test_fetch_skip_half_days_key_maps(ssm_client: object) -> None:
+    """The half-day-skip toggle can be controlled via SSM JSON."""
+
+    settings_value = json.dumps({
+        "maxLossUsd": 250,
+        "skipHalfDays": False,
+    })
+    stubber = Stubber(ssm_client)  # type: ignore[arg-type]
+    stubber.add_response(
+        "get_parameter",
+        {"Parameter": {"Name": "/dev/ibkr-bull-call/settings", "Type": "String", "Value": settings_value}},
+        {"Name": "/dev/ibkr-bull-call/settings", "WithDecryption": False},
+    )
+    with stubber:
+        overrides = fetch_settings_overrides(ssm_client, prefix="/dev/ibkr-bull-call")
+    assert overrides["SKIP_HALF_DAYS"] == "false"
+
+
 def test_fetch_heartbeat_interval_key_maps(ssm_client: object) -> None:
     """The heartbeat-interval setting can be controlled via SSM JSON."""
 

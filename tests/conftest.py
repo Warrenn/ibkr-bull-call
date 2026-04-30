@@ -20,7 +20,7 @@ def _reset_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
                            "ENTRY_TIMEOUT_SEC", "ENTRY_DEADLINE_ET",
                            "LEG_FILL_TIMEOUT_SEC", "MONTHLY_",
                            "MONITORING_", "HEARTBEAT_", "SESSION_ERROR_",
-                           "AWS_")):
+                           "SKIP_HALF_DAYS", "AWS_")):
             monkeypatch.delenv(key, raising=False)
     yield
 
