@@ -219,6 +219,117 @@ Before trusting any backtest result, confirm:
 Bad data will create fake edge faster than bad ideas. **Build nothing on
 top until this phase passes.**
 
+### Phase 1.5: Backtest harness + data spec
+
+Phase 1 says "validate the data". This phase says "name the data, name the
+harness, freeze the spec — then everyone (including future-you) can audit
+what the backtest actually ran."
+
+**Without this phase, every later phase is unfalsifiable**: a result like
+"expectancy +$8 / spread post-cost" means nothing unless the data version,
+slippage model, and code revision that produced it are pinned and
+re-runnable.
+
+#### 1.5.1 Data acquisition spec
+
+Decide and document, **per resolution mode**:
+
+| Item | HRM (required for R23a, R24, R25, R26, VIX-jump) | CRM (entry / regime ablation only) |
+|---|---|---|
+| SPX spot | 1-second or tick from CBOE DataShop / Polygon / Algoseek | 1-minute SPX bars |
+| SPX 0DTE option chain | ≤5-second snapshots, full bid/ask/size per leg | end-of-day chain snapshots + CBOE 0DTE summaries |
+| VIX, VIX3M, VVIX | ≤5-second intraday | daily |
+| ES (lead-time future) | 1-second or tick | 1-minute |
+| Calendar inputs | FOMC/CPI/NFP/PPI/PCE exact times; OPEX dates; NYSE half-days | same |
+| Window | ≥36 months of history; most recent 6 months reserved as untouched holdout per §6.5 | same |
+| Storage | Parquet / DuckDB partitioned by trade-date; checksum manifest | same |
+
+For each dataset, record: vendor, license, acquisition date, raw byte
+checksum, and a "resolution mode" tag (`HRM` or `CRM`). The harness MUST
+refuse to run an HRM-only rule against CRM-tagged data.
+
+#### 1.5.2 Backtest harness build (the per-path-slippage simulator)
+
+The harness from `strategy-review.md` §6.2 — quoted in full so the
+contract is in this document, not by reference:
+
+> **All realised P&L metrics, gates, and invalidation checks must use
+> net P&L after commissions, fees, and modelled slippage.** This
+> includes the per-trade expectancy in §6.3 below, the monthly
+> net-negative gate (R9), the weekly loss cap, and every invalidation
+> criterion in §6.6. There is no "gross P&L" anywhere in the validation
+> pipeline — every reported number is post-cost.
+
+> A **single** per-trade slippage assumption is **not enough** for this
+> strategy. Different exit paths have radically different fill behaviour;
+> modelling them with one number can materially overstate edge. The
+> validation pipeline must use a **per-path slippage model** with
+> separate calibrations.
+
+The six paths the harness must cost separately (the "1×" baseline that
+"2× stress" and "3× stress" multiply against) are, per §6.2:
+
+| Path | Default (1× baseline) | Adverse-fill stress |
+|---|---|---|
+| Entry — combo LMT ladder (R19) | mid + 0.5 tick (~$3 / contract) plus 1× combo bid-ask | mid + 1.5 ticks; full ladder + miss-rate stress |
+| Optional stop / time-stop exit (R25, R26) | combo MKT crossing 1× spread bid-ask | crossing 2× the bid-ask width |
+| Profit-taking exit (R24) | combo MKT at mid + 1 tick | combo MKT at mid |
+| Hard close (R28) | combo MKT crossing 1× bid-ask | crossing 2–3× the bid-ask width |
+| Leg-out flatten (R22) | single-leg MKT crossing 1× that leg's bid-ask | crossing 2× that leg's bid-ask |
+| Data-outage emergency flatten (R23a) | combo MKT, worst of last-known + 5% adverse move on underlying | full combo bid-ask + an additional adverse move equal to the largest 1-second move observed in the prior 60 s |
+
+Commission model, per §6.2: "$0.65 + ~$0.20 SPX options exchange/reg
+fees per contract per leg, on entry AND exit; for a 2-leg combo that's
+~$3.40 round-trip, plus any leg-out flatten fees."
+
+The harness must therefore expose, as first-class config:
+
+- a `slippage_model` object with a per-path multiplier (default `1.0`,
+  stress runs `2.0`, `3.0`)
+- a `commission_model` object stress-tested at $0.65, $1.00, $1.30 per
+  leg (per §6.5)
+- a `worst-path adverse-fill` toggle that worsens the single
+  most-frequent loss path by 50% (per §6.2)
+- a `capital_overlay` switch (`monthly_net_negative_gate` ON / OFF) so
+  every result can be reported both ways (per §6.5 capital-overlay
+  separation)
+
+If the harness cannot toggle each of those independently, ablation
+results from §6.4 will not be trustworthy.
+
+#### 1.5.3 Reproducibility requirements
+
+A backtest result is admissible as evidence in any later phase only if:
+
+- the input-data fingerprint (per-dataset checksum manifest from 1.5.1)
+  is recorded with the result
+- the harness git revision is recorded with the result
+- all RNG-touching code paths use a pinned seed; the seed is recorded
+- inputs (chains, vol surfaces, calendars) are loaded from immutable
+  fixtures, not refreshed live during a run
+- a re-run of the same `(data fingerprint, code rev, seed, config)`
+  reproduces the per-trade ledger byte-for-byte
+
+Anything that fails these checks is exploration, not evidence.
+
+#### 1.5.4 Spec-freeze enforcement (no peeking)
+
+Before any holdout window is touched (per §6.5), the **full ruleset
+must be frozen** — every threshold, every objective, every filter,
+every kill switch — and committed to a versioned document
+(`STRATEGY-SPEC-v{N}.md` or git tag `spec-vN`) with a change log.
+
+The holdout is then evaluated **once**.
+
+Any change to the strategy *after* holdout evaluation — even tightening
+a threshold by a tick — creates a new version (`v{N+1}`), invalidates
+the prior holdout, and requires either a fresh untouched holdout
+window OR a fresh forward-paper period of full promotion-gate length
+(per §5 of `strategy-review.md`).
+
+The harness must refuse to score a holdout run against an unfrozen
+spec — this is the only mechanical guard against silent peek-and-tune.
+
 ### Phase 2: Define the control strategy on validated data
 
 Build a deliberately simple baseline:
@@ -295,6 +406,74 @@ For every promising variant, run:
 
 If a slight worsening of assumptions destroys the edge, the edge is not robust
 enough for live capital.
+
+#### Phase 6 deliverables
+
+Phase 6 has two jobs: stress the edge, and produce the evidence that
+go/no-go criterion #5 ("Drawdowns must be acceptable for the return
+earned") needs in order to be answered. The slippage / commission /
+parameter stresses above answer the *robustness* half. The drawdown
+deliverables below answer the *acceptability* half. Both must ship out
+of this phase.
+
+The "2× / 3× stress" terms above multiply against the per-path baselines
+defined in `strategy-review.md` §6.2 and re-stated in Phase 1.5 — they
+are not freestanding numbers.
+
+For each surviving variant, the phase must produce, on the holdout
+window evaluated under the frozen spec (per §6.5):
+
+**Drawdown statistics** (the producing phase for go/no-go criterion #5):
+
+- **Max drawdown — dollars.** Peak-to-trough P&L drop, post-cost.
+- **Max drawdown — percent of NLV.** Same trough, expressed as a
+  fraction of starting NLV at peak.
+- **Drawdown duration distribution.** For every drawdown ≥1% of NLV,
+  the time from peak to trough. Report median, 75th, 95th percentile.
+- **Recovery time distribution.** For every drawdown ≥1% of NLV, the
+  time from trough to a new equity peak. Report median, 75th, 95th
+  percentile, plus the count of drawdowns not recovered within the
+  holdout window.
+- **Time-underwater fraction.** Share of the holdout window during
+  which equity sat below its prior peak.
+- **Worst rolling 1-month, 3-month, 12-month return.** Post-cost.
+- **Max consecutive losers** and **max single-trade loss** (already
+  required by §6.3 — re-listed here so the drawdown evidence is in one
+  place).
+
+**Comparison vs. simpler alternatives.** Each drawdown statistic above
+must also be reported for the `strategy-review.md` §4.12 benchmarks,
+evaluated on the same window with the same cost discipline:
+
+- no-trade baseline (cash + 3-month T-bill)
+- long-call-only on the same confirmation
+- bull-put spread with the same regime filters
+- call butterfly on the same view
+- ES / MES directional proxy
+
+If the bull-call spread does not beat all of those on **risk-adjusted
+return per unit of drawdown** (Calmar or equivalent) on the holdout,
+the complexity is not paying for itself — pick the simpler alternative.
+
+**Capital-overlay separation.** Every drawdown statistic above must be
+reported **both with and without** the monthly net-negative gate (R9)
+enabled, per §6.5. The "without gate" run is what tests whether the
+edge has acceptable drawdowns on its own; the "with gate" run is what
+tests realised drawdown for the deployed configuration. If the
+"without gate" max drawdown breaches the §6.6 invalidation threshold
+(>15% post-cost), the strategy is dead regardless of how good the
+"with gate" curve looks — the gate is doing the work.
+
+**Stress-run drawdowns.** Every drawdown statistic above must also be
+reported under the 2× and 3× per-path slippage stress and under the
+worst-path 50% adverse-fill stress. A strategy whose drawdown
+acceptability survives the 1× baseline but breaches the §6.6 cap under
+2× stress is not robust enough for live capital.
+
+These deliverables are what the criterion #5 reviewer (you, future-you,
+or anyone resuming this work) reads to answer "are the drawdowns
+acceptable for the return earned." Without them, criterion #5 has no
+producer and the go/no-go decision cannot be made honestly.
 
 ### Phase 7: Separate alpha from capital overlays
 
@@ -391,17 +570,25 @@ If proceeding from here, the highest-value order is:
 1. **Validate the timestamp and executable-price data.** Confirm HRM/CRM
    data resolution per `strategy-review.md` §6.1 before building anything
    on top.
-2. Build the simplest control backtest with realistic costs, on the
+2. **Spec the data and build the harness (Phase 1.5).** Pin vendors,
+   checksums, resolution-mode tags; build the per-path slippage
+   simulator from `strategy-review.md` §6.2; pin seeds, code revs, and
+   fixtures so every later result is reproducible. Freeze the strategy
+   spec (`STRATEGY-SPEC-v{N}.md`) before any holdout window is touched.
+3. Build the simplest control backtest with realistic costs, on the
    validated data.
-3. Test whether the bullish continuation signal has standalone directional edge.
-4. Compare alternative trade expressions on the same signal (risk-adjusted, post-cost).
-5. Add rules one at a time through ablation.
-6. Stress-test fills, fees, and parameters.
-7. Run with and without capital overlays.
-8. Paper trade the best surviving candidate (≥6 months OR ≥60 filled
+4. Test whether the bullish continuation signal has standalone directional edge.
+5. Compare alternative trade expressions on the same signal (risk-adjusted, post-cost).
+6. Add rules one at a time through ablation.
+7. Stress-test fills, fees, and parameters; produce the Phase 6
+   drawdown deliverables (max DD $/%, DD-duration and recovery-time
+   distributions, vs. simpler-alternative comparison) — these are the
+   evidence that go/no-go criterion #5 needs in order to be answered.
+8. Run with and without capital overlays.
+9. Paper trade the best surviving candidate (≥6 months OR ≥60 filled
    spreads, whichever later).
-9. Climb the live deployment staircase (Phase 10), Tier 0 → Tier 1 →
-   Tier 2, with named promotion criteria at each step.
+10. Climb the live deployment staircase (Phase 10), Tier 0 → Tier 1 →
+    Tier 2, with named promotion criteria at each step.
 
 This sequence is the best way to get confident answers quickly without
 deceiving yourself.
