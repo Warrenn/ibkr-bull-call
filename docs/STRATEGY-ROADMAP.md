@@ -21,7 +21,7 @@ to the next. Don't sprawl.
 
 ### v7 — Short SPX 0DTE Iron Condor (no stop, monthly cap)
 
-- **Status**: ACTIVE (this branch)
+- **Status**: KILLED-BY-DIAGNOSTIC (PR #69, 2026-04-30)
 - **Mechanic**: sell wide-OTM call spread + wide-OTM put spread daily
   at 9:32 ET. Risk capped by wing width per side. NO breakeven stop
   (lesson from v6: stop converts ~80% of trades to losses on bull
@@ -59,18 +59,30 @@ to the next. Don't sprawl.
 
 ### v9 — Sector ETF Momentum (monthly rebalance)
 
-- **Status**: QUEUED — NEXT after v7 (per user preference 2026-04-30)
-- **Mechanic**: Rank S&P sector ETFs (XLK, XLF, XLE, XLV, XLY, XLP,
-  XLI, XLB, XLU, XLRE, XLC) by 6-12 month returns. Hold top 3-5,
-  rebalance monthly. Long-only.
-- **Theoretical basis**: cross-sectional momentum is the
-  most-replicated factor in finance (Jegadeesh & Titman 1993).
-  Empirical Sharpe 0.6-1.0 over many decades.
-- **Data**: yfinance daily ETF data, free.
-- **Test cost**: free, ~1 hour.
-- **Deploy cost**: trivial (5-10 ETF trades per month).
-- **Caveat**: low-frequency, dull, may not be exciting enough.
-  Edge has compressed slightly post-2010.
+- **Status**: PROMOTED — paper-trading candidate (PRs #70, this PR, 2026-04-30)
+- **Mechanic**: 12-1 cross-sectional momentum on 11 SPDR sector ETFs.
+  Hold top 3 equal-weighted, monthly rebalance. Long-only. 10 bps
+  round-trip slippage. Frozen as
+  `research/specs/strategy-spec-v9-sector-momentum.yaml`.
+- **Test result (81mo, 2018-06 → 2026-04)**:
+  - Sharpe 1.01, CAGR 16.58%, max DD -16.94%, Calmar 0.98
+  - Beats SPY full-window by +0.91% CAGR (n.s., t=0.22)
+  - **Train/val/holdout split (60/20/20)**: PASSES all spec gates →
+    PROMOTE per `holdout_continue_if`
+- **Caveats** (recorded for paper-trading monitoring):
+  - Holdout slice underperformed SPY by -4.26% — passes only via the
+    \"OR within 5%\" tolerance clause
+  - Cross-window check on dataset-v1 60mo window: v9 LOSES to SPY by
+    -2.58% CAGR — apparent edge concentrated in 2019-2020
+  - Sharpe degraded from 1.83 (val) → 0.86 (holdout)
+  - Fails to beat passive SPY DCA on either window
+- **Data**: `research/data/dataset-v1/sector_etfs_daily.parquet`
+  (yfinance, sha256:03e85be2..., free).
+- **Test cost**: free.
+- **Deploy cost**: trivial (3 ETF trades per month).
+- **Recommended next step**: paper-trade for at least 6 months
+  monitoring monthly returns vs SPY before any live-capital decision.
+  Regime sensitivity is a real concern.
 
 ### v10 — Pairs Trading on Cointegrated Equity Pairs
 
@@ -104,23 +116,26 @@ to the next. Don't sprawl.
 - **Caveat**: trade frequency is much lower (weekly/monthly cycle vs
   daily 0DTE). Results play out over weeks.
 
-## Order of execution (per user preference 2026-04-30)
+## Order of execution
 
-1. **v7** (ACTIVE) — short iron condor on SPX 0DTE
-2. **v9** (NEXT) — sector ETF momentum (monthly rebalance)
-3. **v8** — vol term structure carry (third)
-4. **v11** — calendar spreads (fourth)
-5. **v10** — pairs trading (fifth)
+1. ~~**v7** — short iron condor on SPX 0DTE~~ → KILLED-BY-DIAGNOSTIC (PR #69)
+2. ~~**v9** — sector ETF momentum~~ → **PROMOTED** (paper-trading candidate)
+3. **v8** (NEXT) — vol term structure carry
+4. **v11** — calendar spreads
+5. **v10** — pairs trading
 
-User preference recorded 2026-04-30: after v7 completes
-(KILLED or PROMOTED), the next strategy is v9 sector momentum
-— a deliberate pivot away from option structures toward simple
-ETF rotation. The remaining three (v8 vol carry, v11 calendars,
-v10 pairs) follow.
+v9 is the first strategy in the project to survive the falsification
+framework. It is now a paper-trading candidate — NOT a live-capital
+deployment. See v9 caveats above; regime sensitivity is a real concern.
 
-Each gets a fair shot under the same falsification framework:
-shape → validate → holdout. Move to the next only after the prior is
-either KILLED or PROMOTED.
+Two paths forward (the user can run them in parallel or sequentially):
+
+- **Path A — paper-trade v9** while continuing strategy research.
+  Monthly rebalance is low-burden; can be run on the existing project
+  infrastructure with minor adaptation away from the SPX 0DTE bot.
+- **Path B — proceed to v8** in parallel. Each strategy gets a fair
+  shot under the same shape → validate → holdout framework. Move to
+  the next only after the prior is KILLED or PROMOTED.
 
 ## Lessons carried forward
 
