@@ -291,8 +291,12 @@ def test_spot_from_message_returns_none_for_unsupported_type() -> None:
         (5, 5.0),
         ("5005.0", 5005.0),
         ("5,005.50", 5005.50),    # comma-separated
-        ("5.5C", 5.5),             # IBKR's C/H/K/% suffixes
+        # IBKR's C/H/K/% suffixes (close / halt / thousands / percent)
+        # all stripped via the same .rstrip("CHK%") call.
+        ("5.5C", 5.5),
         ("5.5H", 5.5),
+        ("5.5K", 5.5),
+        ("5.5%", 5.5),
         ("nope", "nan"),           # non-numeric string
         (object(), "nan"),         # unsupported type
     ],
