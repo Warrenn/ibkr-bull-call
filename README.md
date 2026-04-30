@@ -57,7 +57,7 @@ each rule and its intent in detail.
 | Half-day skip | `skipHalfDays` | NYSE early 1 pm close coincides with default deadline; zero execution headroom |
 | SIGTERM-aware everything | always on | ASG/docker-stop blocked behind hung syscalls; daemon ignores graceful shutdown |
 | Session-level crash recovery + circuit breaker | `sessionErrorBackoffSec`, `sessionErrorMaxConsecutive` | Transient blip kills the daemon; ASG respawns + IBeam re-auth + 2FA = expensive |
-| Periodic heartbeat | `heartbeatIntervalSec` | CloudWatch can't tell quiet-by-design from frozen-process during long quiet stretches |
+| Periodic heartbeat | `heartbeatIntervalSec` | The bot emits a `heartbeat` structured event at this cadence so an operator-wired CloudWatch metric filter + alarm can distinguish quiet-by-design from frozen-process. The CFN stack does NOT provision the alarm — wire one against the absence of `heartbeat` events in the bot log group |
 | Settings cross-field validation | always on | SSM misconfig (e.g. deadline before entry time, POP > 1) silently produces a do-nothing daemon |
 
 > **Default values** for each setting are intentionally NOT duplicated in
@@ -116,7 +116,7 @@ Strategy-side settings:
 | SSM key (env equivalent) | Default | Notes |
 |---|---|---|
 | `maxLossUsd` (`MAX_LOSS_USD`) | *required* | Hard cap on max loss per spread (debit × 100), > 0 |
-| `symbols` (`SYMBOLS`) | `SPX` | Comma-separated underlyings |
+| `symbols` (`SYMBOLS`) | `SPX` | Single underlying — multi-symbol not supported (`_monitor_open_spreads` is serial; `load_settings` rejects > 1) |
 | `popThreshold` (`POP_THRESHOLD`) | `0.55` | Minimum BS probability of profit, `[0, 1]` |
 | `riskFreeRate` (`RISK_FREE_RATE`) | `0.05` | For BS POP calc |
 | `minProfitToLossRatio` (`MIN_PROFIT_TO_LOSS_RATIO`) | `null` | If set, caps the limit at `width / (1 + ratio)` |
@@ -198,6 +198,47 @@ leaves trade history and release tarballs intact. To actually delete
 either, run `aws dynamodb delete-table` / `aws s3 rb --force` after the
 stack is gone.
 
+## Manually settling a stale OPEN row
+
+When a session's settlement fails — `fetch_spot` returns `None`, the spot
+falls outside the strike-band sanity check, or a stop / outage MKT close
+doesn't fill before the session ends — the spread row stays `OPEN` in
+DynamoDB. The next session's startup detects this and emits a
+`stale_open_spread` event in CloudWatch (one event per orphaned row, with
+`spread_id`, `date`, `symbol`, `long_strike`, `short_strike`, `debit`,
+`opened_at`). An operator alarm wired to that event name should fire.
+
+Because the bot doesn't fetch historical settlement values, **the repair
+is manual**. Steps:
+
+1. Find the official **CBOE SPX settlement value (SET)** for the
+   spread's date. CBOE publishes daily settlement values; cross-check the
+   value against published 4 pm ET SPX prints if you don't have direct
+   SET-feed access.
+
+2. Compute realized P&L per `bull_call.strategy.settlement_pnl`:
+   `payoff = max(0, S − long_strike) − max(0, S − short_strike) − debit`,
+   times 100 per contract.
+
+3. Update the DynamoDB row (replace `<...>` placeholders):
+   ```bash
+   aws dynamodb update-item \
+     --table-name bull-call-<env>-state \
+     --key '{"pk":{"S":"SPREAD#<date>"},"sk":{"S":"<symbol>"}}' \
+     --update-expression "SET #s = :st, closed_at = :ca, settle_value = :sv, pnl = :p" \
+     --expression-attribute-names '{"#s":"status"}' \
+     --expression-attribute-values \
+       '{":st":{"S":"SETTLED"},":ca":{"S":"<iso-utc-of-repair>"},":sv":{"N":"<set>"},":p":{"N":"<pnl>"}}'
+   ```
+
+4. Confirm the next session's start emits zero `stale_open_spread`
+   events for that row.
+
+If the CBOE SET is unrecoverable (e.g. data subscription gap), settle
+the row with `settle_value=0`, `pnl=0` and add a note to the operator
+log; this preserves monthly-gate math correctness at the cost of one
+trade's P&L being unattributed.
+
 ## Project layout
 
 ```
@@ -223,7 +264,7 @@ src/bull_call/
 infra/
   cloudformation/       # data / network / compute stacks
   scripts/              # deploy.sh, release.sh, seed-secrets.sh
-tests/                  # 278 tests (no IBKR live coverage; live validation via --dry-run)
+tests/                  # pytest suite (no IBKR live coverage; live validation via --dry-run)
 docs/                   # strategy-review.md + live-capital-go-no-go.md
 ```
 

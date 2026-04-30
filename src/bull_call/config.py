@@ -8,10 +8,27 @@ from dataclasses import dataclass, field
 from typing import Mapping
 
 _TRUTHY = frozenset({"true", "1", "yes", "on"})
+_FALSY = frozenset({"false", "0", "no", "off"})
 
 
-def _parse_bool(value: str) -> bool:
-    return value.strip().lower() in _TRUTHY
+def _parse_bool(value: str, var: str) -> bool:
+    """Strict whitelist parse — anything outside truthy/falsy raises.
+
+    The previous loose form (``value in TRUTHY else False``) silently
+    treated typos like ``STOP_ENABLED=treu`` as False and disabled the
+    safety control. Safety-critical bools must fail loud at startup so
+    a misconfigured SSM value surfaces as a session error, not as a
+    silently-disabled fail-safe.
+    """
+
+    normalized = value.strip().lower()
+    if normalized in _TRUTHY:
+        return True
+    if normalized in _FALSY:
+        return False
+    raise ValueError(
+        f"{var} must be one of {sorted(_TRUTHY | _FALSY)}; got {value!r}",
+    )
 
 
 def _parse_time(value: str, var: str) -> dt.time:
@@ -203,7 +220,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     )
 
     pop_threshold = _parse_bounded_float(
-        src, "POP_THRESHOLD", default=0.70,
+        src, "POP_THRESHOLD", default=0.55,
         min_=0.0, max_=1.0, reason="POP is a probability.",
     )
 
@@ -240,7 +257,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         src, "SESSION_ERROR_MAX_CONSECUTIVE", default=5,
     )
 
-    skip_half_days = _parse_bool(src.get("SKIP_HALF_DAYS", "true"))
+    skip_half_days = _parse_bool(src.get("SKIP_HALF_DAYS", "true"), "SKIP_HALF_DAYS")
 
     entry_time_et = _parse_time(src.get("ENTRY_TIME_ET", "10:30"), "ENTRY_TIME_ET")
     entry_deadline_et = _parse_time(
@@ -253,16 +270,35 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
             "is empty and the bot would never submit any entries."
         )
 
+    symbols = _parse_symbols(src.get("SYMBOLS", "SPX"))
+    if len(symbols) == 0:
+        raise ValueError(
+            "SYMBOLS must contain at least one ticker; got an empty list. "
+            "Set SYMBOLS to a single ticker (e.g. SPX).",
+        )
+    if len(symbols) > 1:
+        # _monitor_open_spreads runs serially over open positions — a second
+        # symbol's monitor doesn't start until the first ends, leaving the
+        # later symbol effectively unmonitored. Until concurrent monitoring
+        # is implemented (strategy-review.md §3.8), refuse multi-symbol at
+        # config load rather than ship a known-unsafe deployment.
+        raise ValueError(
+            f"SYMBOLS currently must be a single ticker; got {symbols!r}. "
+            "Multi-symbol monitoring is not yet supported (per strategy-review.md "
+            "§3.8) — _monitor_open_spreads runs serially and the second symbol "
+            "would go effectively unmonitored.",
+        )
+
     return Settings(
         ib_host=src.get("IB_HOST", "ibgateway"),
         ib_port=_parse_int(src, "IB_PORT", default=4002),
         ib_client_id=_parse_int(src, "IB_CLIENT_ID", default=7),
-        symbols=_parse_symbols(src.get("SYMBOLS", "SPX")),
+        symbols=symbols,
         max_loss_usd=max_loss,
         pop_threshold=pop_threshold,
         risk_free_rate=_parse_float(src, "RISK_FREE_RATE", default=0.05),
         entry_time_et=entry_time_et,
-        stop_enabled=_parse_bool(src.get("STOP_ENABLED", "true")),
+        stop_enabled=_parse_bool(src.get("STOP_ENABLED", "true"), "STOP_ENABLED"),
         stop_latest_sec=stop_latest_sec,
         state_table=src.get("STATE_TABLE", "bull-call-dev-state"),
         log_level=src.get("LOG_LEVEL", "INFO").upper(),
@@ -272,6 +308,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         leg_fill_timeout_sec=leg_fill_timeout_sec,
         monthly_stop_on_negative_pnl=_parse_bool(
             src.get("MONTHLY_STOP_ON_NEGATIVE_PNL", "true"),
+            "MONTHLY_STOP_ON_NEGATIVE_PNL",
         ),
         monitoring_quote_grace_sec=monitoring_quote_grace_sec,
         monitoring_reconnect_max_attempts=monitoring_reconnect_max_attempts,

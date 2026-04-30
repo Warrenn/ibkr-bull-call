@@ -96,6 +96,11 @@ Resources:
                   - dynamodb:UpdateItem
                   - dynamodb:Query
                   - dynamodb:DescribeTable
+                  # Scan is used by Store.monthly_pnl_total to aggregate
+                  # realized P&L for the R9 monthly net-negative gate.
+                  # The state table holds ~22 rows/month — Scan is cheaper
+                  # to operate than introducing a GSI keyed by year_month.
+                  - dynamodb:Scan
                 Resource:
                   Fn::ImportValue: !Sub bull-call-${Env}-state-table-arn
 
@@ -196,13 +201,17 @@ Resources:
               install -m 0755 /root/.local/bin/uv /usr/local/bin/uv
 
               # Download the release tarball from the artifacts bucket.
+              # Bare `$VAR` (no braces) is bash-only — Fn::Sub only matches
+              # the brace form, so bare `$VERSION` is left for bash to expand
+              # at runtime under set -u. The braced CFN-side substitutions
+              # for Version and ArtifactsBucket below render at deploy time.
               mkdir -p /opt/bull-call
               VERSION="${Version}"
               ARTIFACTS_BUCKET="${ArtifactsBucket}"
               if [[ "$VERSION" == "latest" ]]; then
                   S3_KEY="latest/bull-call.tar.gz"
               else
-                  S3_KEY="releases/${!VERSION}/bull-call.tar.gz"
+                  S3_KEY="releases/$VERSION/bull-call.tar.gz"
               fi
               for i in 1 2 3 4 5; do
                   if aws s3 cp "s3://$ARTIFACTS_BUCKET/$S3_KEY" /tmp/bull-call.tar.gz; then break; fi

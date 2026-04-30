@@ -246,3 +246,55 @@ def test_monthly_pnl_invalid_year_month_raises(store: Store) -> None:
         store.monthly_pnl_total("202604")
     with pytest.raises(ValueError):
         store.monthly_pnl_total("2026-4")
+
+
+# ---------- stale OPEN row detection (F4) ----------------------------------
+
+
+def test_load_stale_open_spreads_returns_only_prior_day_opens(
+    store: Store,
+) -> None:
+    """A spread row left OPEN by a prior day's failed settlement (e.g.
+    fetch_spot returned None or fell outside the sanity band) is invisible
+    to ``load_open_spreads_for_today`` because that filters on the date
+    partition. Without a separate query, the row corrupts realized P&L
+    and the monthly capital gate forever. ``load_stale_open_spreads``
+    surfaces them so the scheduler can emit an alert and the operator can
+    manually settle."""
+
+    # Prior-day OPEN — should be returned.
+    stale = store.record_open(
+        date="2026-04-27", symbol="SPX",
+        long_strike=4990.0, short_strike=5000.0, debit=4.0,
+        opened_at="2026-04-27T14:30:00+00:00",
+    )
+    # Today's OPEN — should NOT be returned (it's not stale yet).
+    store.record_open(
+        date="2026-04-29", symbol="SPX",
+        long_strike=4995.0, short_strike=5005.0, debit=5.5,
+        opened_at="2026-04-29T14:30:00+00:00",
+    )
+    # Prior-day already SETTLED — should NOT be returned.
+    settled = store.record_open(
+        date="2026-04-28", symbol="SPX",
+        long_strike=4995.0, short_strike=5005.0, debit=5.0,
+        opened_at="2026-04-28T14:30:00+00:00",
+    )
+    store.record_settlement(
+        spread_id=settled, closed_at="2026-04-28T20:00:00+00:00",
+        settle_value=5001.0, pnl=100.0,
+    )
+
+    stale_rows = store.load_stale_open_spreads("2026-04-29")
+    assert [r.id for r in stale_rows] == [stale]
+
+
+def test_load_stale_open_spreads_empty_when_no_prior_opens(store: Store) -> None:
+    """Happy path: when no OPEN rows from prior days exist, returns []."""
+
+    store.record_open(
+        date="2026-04-29", symbol="SPX",
+        long_strike=4995.0, short_strike=5005.0, debit=5.5,
+        opened_at="2026-04-29T14:30:00+00:00",
+    )
+    assert store.load_stale_open_spreads("2026-04-29") == []

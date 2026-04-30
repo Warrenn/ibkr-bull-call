@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import math
 from collections.abc import Iterator
 from typing import Any
@@ -654,3 +655,121 @@ def test_settlement_pnl_partial_inside_strikes() -> None:
 def test_settlement_pnl_at_breakeven() -> None:
     pnl = settlement_pnl(entry_debit=5.50, long_strike=4995.0, short_strike=5005.0, settle_spot=5000.50)
     assert pnl == pytest.approx(0.0)
+
+
+# ---------- unfilled-close handling (F1) -----------------------------------
+
+
+def test_monitor_stop_does_not_corrupt_row_when_close_does_not_fill(
+    store: Store, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """If a stop fires but ``submit_close_market`` returns unfilled (timeout
+    or shutdown mid-close), avg_fill_price is NaN. Computing pnl from NaN
+    and writing it to DynamoDB raises ``TypeError: Infinity and NaN not
+    supported``, which converts a close timeout into a session exception
+    with a still-open IBKR position — exactly the failure mode the safety
+    model is supposed to avoid.
+
+    Required behaviour: the row stays OPEN, a ``spread_close_incomplete``
+    event is emitted with the order_id so the operator / next-instance
+    reconcile can adopt the working IBKR order, and no DDB write happens
+    for this close attempt."""
+
+    sid = store.record_open(
+        date="2026-04-29", symbol="SPX",
+        long_strike=4995.0, short_strike=5005.0, debit=5.50,
+        opened_at="2026-04-29T14:30:00+00:00",
+    )
+    settings = make_settings()
+    close = dt.datetime(2026, 4, 29, 20, 0, tzinfo=dt.timezone.utc)
+
+    def submit_close(**_: Any) -> FillReport:
+        # MKT close left working at IBKR (timeout / shutdown mid-close).
+        return FillReport(filled=False, avg_fill_price=math.nan, order_id="ord-99")
+
+    caplog.set_level(logging.INFO, logger="bull_call.events")
+
+    outcome = monitor_stop(
+        store,
+        spread_id=sid, breakeven=5000.50, settings=settings, close_utc=close,
+        tick_stream=ticks([
+            (5001.0, dt.datetime(2026, 4, 29, 15, 0, tzinfo=dt.timezone.utc)),
+            (4999.0, dt.datetime(2026, 4, 29, 18, 0, tzinfo=dt.timezone.utc)),
+        ]),
+        submit_close=submit_close,
+    )
+
+    # Outcome still FIRED — we DID attempt the close; the order is just
+    # working at IBKR. The next-instance reconcile picks it up.
+    assert outcome is StopOutcome.FIRED
+    rec = store.get_spread(sid)
+    # CRITICAL: row stays OPEN. NaN must NOT have been persisted.
+    assert rec.status == "OPEN", (
+        "unfilled close must leave row OPEN — NaN P&L would corrupt the "
+        "store and strand the IBKR position"
+    )
+    # Operator must see the incomplete-close signal.
+    incomplete_logs = [
+        r for r in caplog.records
+        if r.name == "bull_call.events"
+        and "spread_close_incomplete" in r.getMessage()
+    ]
+    assert incomplete_logs, (
+        "expected spread_close_incomplete event so operator alerting fires"
+    )
+    assert any('"ord-99"' in r.getMessage() for r in incomplete_logs), (
+        "event must include the working order_id so the operator can find "
+        "it at IBKR"
+    )
+
+
+def test_emergency_flatten_does_not_corrupt_row_when_close_does_not_fill(
+    store: Store, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Same NaN-corruption hazard on the R23a outage-flatten path: an
+    emergency MKT close that doesn't fill within timeout returns NaN
+    avg_fill_price, which would crash record_close. Row must stay OPEN;
+    spread_close_incomplete event must fire with order_id."""
+
+    sid = _opened(store)
+    settings = make_settings(
+        monitoring_quote_grace_sec=15,
+        monitoring_reconnect_max_attempts=0,  # fire flatten as soon as max blind hit
+        monitoring_quote_max_blind_sec=60,
+    )
+    close = dt.datetime(2026, 4, 29, 20, 0, tzinfo=dt.timezone.utc)
+    base = dt.datetime(2026, 4, 29, 15, 0, tzinfo=dt.timezone.utc)
+
+    def submit_close(**_: Any) -> FillReport:
+        return FillReport(filled=False, avg_fill_price=math.nan, order_id="ord-77")
+
+    caplog.set_level(logging.INFO, logger="bull_call.events")
+    stream = ticks([
+        (5005.0, base),
+        (None, base + dt.timedelta(seconds=20)),
+        (None, base + dt.timedelta(seconds=40)),
+        (None, base + dt.timedelta(seconds=60)),  # → flatten attempt
+    ])
+
+    outcome = monitor_stop(
+        store,
+        spread_id=sid, breakeven=5000.50, settings=settings, close_utc=close,
+        tick_stream=stream, submit_close=submit_close,
+        reconnect_fn=lambda: None,
+    )
+
+    # Outcome still OUTAGE_FLATTEN — we attempted the close; order is
+    # working at IBKR awaiting reconcile.
+    assert outcome is StopOutcome.OUTAGE_FLATTEN
+    rec = store.get_spread(sid)
+    assert rec.status == "OPEN", (
+        "unfilled outage flatten must leave row OPEN; next-instance "
+        "reconcile adopts the working IBKR order"
+    )
+    incomplete_logs = [
+        r for r in caplog.records
+        if r.name == "bull_call.events"
+        and "spread_close_incomplete" in r.getMessage()
+    ]
+    assert incomplete_logs
+    assert any('"ord-77"' in r.getMessage() for r in incomplete_logs)
