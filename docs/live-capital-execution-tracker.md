@@ -26,7 +26,7 @@ Track each item as `TODO`, `DOING`, `DONE`, `BLOCKED`, or `KILLED`.
 | Item | Status | Evidence / Artifact | Owner | Notes |
 | --- | --- | --- | --- | --- |
 | Phase 0 repo audit | DONE | "Notes From Current Repo State" below + PRs #41 #42 | me | Every code-side §3 P0/P1 closed; the two strategy hypotheses (strikes / stop) are deferred to §5.A / §5.B ablation per CONTRIBUTING.md |
-| Data inventory | TODO | `docs/data-inventory.md` | me | Name data sources actually available now |
+| Data inventory | DONE | `docs/data-inventory.md` | me | Verdict 2026-04-30: Phase 1 + 2 BLOCKED on data acquisition (3 of 4 manifest entries TBD); only `trading_calendar` populated. Code is not the bottleneck. |
 | Strategy spec freeze | DONE | `docs/STRATEGY-SPEC-v1.md` | me | Frozen 2026-04-30 — sizing/overlays/pre-run checklist added; entry/exit window timestamps deferred to YAML pre-run pins |
 | Directional edge test | TODO | `artifacts/directional-edge-v1/` | me | Fastest falsification step |
 | Minimal post-cost control backtest | TODO | `artifacts/control-backtest-v1/` | me | Must be reproducible |
@@ -59,12 +59,18 @@ These are the items worth doing immediately.
   unpinned input must be marked `status: PRE_FREEZE` and excluded from
   decision rules.**
 
-- [ ] Create `docs/data-inventory.md`.
+- [x] Create `docs/data-inventory.md`.
   Include: what SPX, option-chain, ES, VIX, and calendar data you already
   have; source; timestamp resolution; date coverage; storage path; missing
   pieces.
   Exit: we know whether fast validation is blocked by missing data or just by
   missing code.
+  **Status: DONE 2026-04-30 — only `trading_calendar` is populated;
+  `spx_spot_intraday`, `es_or_mes_intraday`, and `spx_0dte_call_chain` are
+  TBD. Verdict: Phase 1 (directional-edge) and Phase 2 (expression
+  comparison) are BLOCKED on data acquisition, not on code. Vendor
+  candidates listed without commitment; the buy decision lives in a
+  separate `docs/data-acquisition-decision.md` (not yet written).**
 
 - [ ] Run the fastest falsification test first: directional edge without the
   options wrapper.
