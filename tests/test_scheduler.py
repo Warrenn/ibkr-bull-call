@@ -581,13 +581,49 @@ def test_reconcile_skips_already_opened_today(
 # ---------- _record_settlements --------------------------------------------
 
 
-def test_record_settlements_no_op_when_no_open_spreads(store: Store) -> None:
-    """No open rows in DDB → no API calls, no events."""
+class _SchedRespStub:
+    """Minimal ``Result``-shaped object: just exposes ``.data``."""
+
+    def __init__(self, data: Any) -> None:
+        self.data = data
+
+
+class _UnderlyingLookupClient:
+    """Fake IbkrClient that satisfies the one method ``_record_settlements``
+    needs (``search_contract_by_symbol``). Extracted so each settlement test
+    doesn't redefine the same class. Returns a fixed conid for any symbol —
+    tests that care about per-symbol routing can subclass."""
+
+    UNDERLYING_CONID = 416904
+
+    def search_contract_by_symbol(
+        self, *, symbol: str, sec_type: str,
+    ) -> _SchedRespStub:
+        return _SchedRespStub([{"conid": self.UNDERLYING_CONID}])
+
+
+def test_record_settlements_no_op_when_no_open_spreads(
+    store: Store, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No open rows in DDB → no API calls, no DDB writes, no logs."""
 
     sched = Scheduler(_settings(), store)
     sched._client = object()  # type: ignore[assignment]  # asserted non-None
-    # If anything tries to invoke a client method, AttributeError surfaces.
+    caplog.set_level(logging.DEBUG, logger="bull_call.scheduler")
+    caplog.set_level(logging.DEBUG, logger="bull_call.events")
+
+    # Snapshot store state before (empty by construction).
+    before = store.load_open_spreads_for_today("2026-04-29")
+    assert before == []
+
     sched._record_settlements(dt.date(2026, 4, 29))
+
+    # No state changes: still empty.
+    assert store.load_open_spreads_for_today("2026-04-29") == []
+    # And no scheduler / events log records emitted at all.
+    assert [r for r in caplog.records if r.name in (
+        "bull_call.scheduler", "bull_call.events",
+    )] == []
 
 
 def test_record_settlements_records_settle_for_open_spread(
@@ -596,19 +632,8 @@ def test_record_settlements_records_settle_for_open_spread(
     """Open spread + valid settle spot → DDB row updated to SETTLED with
     pnl and settle_value populated."""
 
-    from typing import Any
-
     sched = Scheduler(_settings(), store)
-
-    class _Resp:
-        def __init__(self, data: Any) -> None:
-            self.data = data
-
-    class FakeClient:
-        def search_contract_by_symbol(self, *, symbol: str, sec_type: str) -> _Resp:
-            return _Resp([{"conid": 416904}])
-
-    sched._client = FakeClient()  # type: ignore[assignment]
+    sched._client = _UnderlyingLookupClient()  # type: ignore[assignment]
 
     store.record_open(
         date="2026-04-29", symbol="SPX",
@@ -616,8 +641,6 @@ def test_record_settlements_records_settle_for_open_spread(
         opened_at="2026-04-29T14:30:00+00:00",
     )
 
-    # fetch_spot is called against the (fake) client; stub it to return
-    # a deterministic settle value.
     monkeypatch.setattr(
         "bull_call.scheduler.fetch_spot",
         lambda _client, *, conid: 5008.21,
@@ -641,20 +664,8 @@ def test_record_settlements_skips_when_spot_unavailable(
     """fetch_spot returns None — leave the row OPEN (operator can rerun
     or manual-settle later) and log loudly so it's visible in CW."""
 
-    import logging
-    from typing import Any
-
     sched = Scheduler(_settings(), store)
-
-    class _Resp:
-        def __init__(self, data: Any) -> None:
-            self.data = data
-
-    class FakeClient:
-        def search_contract_by_symbol(self, *, symbol: str, sec_type: str) -> _Resp:
-            return _Resp([{"conid": 416904}])
-
-    sched._client = FakeClient()  # type: ignore[assignment]
+    sched._client = _UnderlyingLookupClient()  # type: ignore[assignment]
 
     store.record_open(
         date="2026-04-29", symbol="SPX",
