@@ -64,6 +64,7 @@ class Candidate:
     signal_time_et: str
     eow_time_et: str
     vix_band: str | None = None  # None | "low" | "high" — v3 regime gate
+    bond_direction: str | None = None  # None | "up" | "down" — v4-C gate
 
     @property
     def label(self) -> str:
@@ -72,7 +73,11 @@ class Candidate:
             f"signal={self.signal_time_et} "
             f"eow={self.eow_time_et}"
         )
-        return f"{base} vix={self.vix_band}" if self.vix_band else base
+        if self.vix_band:
+            base += f" vix={self.vix_band}"
+        if self.bond_direction:
+            base += f" bonds={self.bond_direction}"
+        return base
 
 
 _DEFAULT_GRID: tuple[Candidate, ...] = tuple(
@@ -150,6 +155,48 @@ def filter_calendar_by_vix_band(
         if prior is None:
             return False
         return prior < median if band == "low" else prior >= median
+
+    return calendar[calendar["date"].apply(in_band)].copy()
+
+
+def compute_prior_day_return_sign(daily_df: pd.DataFrame) -> dict[dt.date, int]:
+    """Map each date to the SIGN of the previous trading day's daily
+    return (close[t-1] - close[t-2]). Used by v4-C bond-direction gate.
+
+    Returns +1 (bonds up that prior day), -1 (bonds down), 0 (flat).
+    The first two days of the dataset have no prior return — omitted.
+    """
+
+    sorted_df = daily_df.sort_values("date").reset_index(drop=True)
+    out: dict[dt.date, int] = {}
+    for i in range(2, len(sorted_df)):
+        prior_close = float(sorted_df["close"].iloc[i - 1])
+        prior_prior_close = float(sorted_df["close"].iloc[i - 2])
+        delta = prior_close - prior_prior_close
+        out[sorted_df["date"].iloc[i]] = (
+            1 if delta > 0 else (-1 if delta < 0 else 0)
+        )
+    return out
+
+
+def filter_calendar_by_bond_direction(
+    calendar: pd.DataFrame,
+    *,
+    prior_bond_sign_by_date: dict[dt.date, int],
+    direction: str,  # "up" | "down"
+) -> pd.DataFrame:
+    """Drop rows whose prior-day bond direction is outside the band.
+
+    "up" means prior-day return > 0 (TLT rose, yields fell).
+    "down" means prior-day return < 0 (TLT fell, yields rose).
+    Days with no prior-day return (start of dataset) are dropped.
+    """
+
+    def in_band(d: dt.date) -> bool:
+        sign = prior_bond_sign_by_date.get(d)
+        if sign is None or sign == 0:
+            return False
+        return (sign > 0) if direction == "up" else (sign < 0)
 
     return calendar[calendar["date"].apply(in_band)].copy()
 
@@ -254,29 +301,33 @@ def sweep(
     calendar: pd.DataFrame,
     candidates: tuple[Candidate, ...] = _DEFAULT_GRID,
     vix_filter: dict[str, dict[dt.date, float] | float] | None = None,
+    bond_filter: dict[dt.date, int] | None = None,
 ) -> list[CandidateResult]:
     """Run the candidate grid against ``calendar``.
 
     If ``vix_filter`` is provided, candidates whose ``vix_band`` is
-    set will further restrict the calendar to dates whose prior-day
-    VIX is in the requested band before evaluation.
-
-    ``vix_filter`` shape::
-
-        {"prior_vix_by_date": dict[date, float], "median": float}
+    set will further restrict the calendar by VIX band.
+    If ``bond_filter`` is provided, candidates whose ``bond_direction``
+    is set will further restrict the calendar by prior-day bond direction.
+    Both filters can be active simultaneously (combined gating).
     """
 
     results: list[CandidateResult] = []
     for c in candidates:
+        cal_for_c = calendar
         if c.vix_band is not None and vix_filter is not None:
             cal_for_c = filter_calendar_by_vix_band(
-                calendar,
+                cal_for_c,
                 prior_vix_by_date=vix_filter["prior_vix_by_date"],  # type: ignore[arg-type]
                 band=c.vix_band,
                 median=vix_filter["median"],  # type: ignore[arg-type]
             )
-        else:
-            cal_for_c = calendar
+        if c.bond_direction is not None and bond_filter is not None:
+            cal_for_c = filter_calendar_by_bond_direction(
+                cal_for_c,
+                prior_bond_sign_by_date=bond_filter,
+                direction=c.bond_direction,
+            )
         r = evaluate_candidate(bars=bars, calendar=cal_for_c, candidate=c)
         if r is not None:
             results.append(r)
@@ -317,15 +368,16 @@ def format_report(
         "",
         "## Candidates ranked by |t-stat| (most significant first; sign indicates direction)",
         "",
-        "| threshold | signal_time | eow_time | vix_band | n | mean | t-stat | p-value | 95% CI | hit_rate | by_year_min | verdict |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| threshold | signal_time | eow_time | vix | bonds | n | mean | t-stat | p-value | 95% CI | hit_rate | by_year_min | verdict |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in results:
         c = r.candidate
         vix = c.vix_band or "—"
+        bonds = c.bond_direction or "—"
         lines.append(
             f"| {c.threshold:.4%} | {c.signal_time_et} | {c.eow_time_et} | "
-            f"{vix} | {r.n} | {r.mean:+.4%} | {r.t_stat:+.2f} | {r.p_value:.3f} | "
+            f"{vix} | {bonds} | {r.n} | {r.mean:+.4%} | {r.t_stat:+.2f} | {r.p_value:.3f} | "
             f"[{r.ci_low_95:+.4%}, {r.ci_high_95:+.4%}] | "
             f"{r.hit_rate:.1%} | {r.by_year_min:+.4%} | {r.verdict_nuanced} |"
         )
@@ -384,6 +436,23 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "duplicates each candidate into low/high VIX bands using "
              "a median split on prior-day VIX close within the window.",
     )
+    p.add_argument(
+        "--signal-times", nargs="+", default=None,
+        help="Override the default signal-time grid (default: "
+             "10:00 10:30 11:00). v4-B uses 14:00 14:30 for afternoon "
+             "mean-reversion exploration.",
+    )
+    p.add_argument(
+        "--thresholds", nargs="+", type=float, default=None,
+        help="Override the default threshold grid (default: 0.001 "
+             "0.0025 0.005 0.0075). Decimal fractions, e.g. 0.005 = 0.5%.",
+    )
+    p.add_argument(
+        "--bond-data", type=Path, default=None,
+        help="Optional bond ETF/futures daily parquet (e.g. TLT) — when "
+             "present, the sweep duplicates each candidate into bond-up "
+             "and bond-down bands using the SIGN of prior-day return.",
+    )
     return p.parse_args(argv)
 
 
@@ -409,9 +478,38 @@ def main(argv: list[str] | None = None) -> int:
         )
         excluded_count = before - len(cal_window)
 
-    candidates = _DEFAULT_GRID
+    # Build the candidate grid — defaults match _DEFAULT_GRID, overridable
+    # via --signal-times / --thresholds for v4 mechanic exploration.
+    sig_times = args.signal_times or ["10:00", "10:30", "11:00"]
+    thresholds = (
+        tuple(args.thresholds) if args.thresholds is not None
+        else (0.0010, 0.0025, 0.0050, 0.0075)
+    )
+    base_grid = tuple(
+        Candidate(threshold=t, signal_time_et=s, eow_time_et="15:55")
+        for t in thresholds
+        for s in sig_times
+    )
+    candidates = base_grid
     vix_filter: dict[str, object] | None = None
     vix_median: float | None = None
+    bond_filter: dict[dt.date, int] | None = None
+
+    if args.bond_data is not None:
+        bond_df = pd.read_parquet(args.bond_data)
+        bond_filter = compute_prior_day_return_sign(bond_df)
+        # Duplicate the grid into up/down bond bands.
+        candidates = tuple(
+            Candidate(
+                threshold=c.threshold,
+                signal_time_et=c.signal_time_et,
+                eow_time_et=c.eow_time_et,
+                bond_direction=direction,
+            )
+            for c in candidates
+            for direction in ("up", "down")
+        )
+
     if args.vix_data is not None:
         vix_df = pd.read_parquet(args.vix_data)
         prior_vix = compute_prior_vix_by_date(vix_df)
@@ -421,20 +519,26 @@ def main(argv: list[str] | None = None) -> int:
             end=args.window_end,
         )
         vix_filter = {"prior_vix_by_date": prior_vix, "median": vix_median}
+        # Iterate over the existing ``candidates`` (which may already
+        # have bond_direction set) so VIX × bonds combos are produced
+        # when both flags are active.
         candidates = tuple(
             Candidate(
                 threshold=c.threshold,
                 signal_time_et=c.signal_time_et,
                 eow_time_et=c.eow_time_et,
                 vix_band=band,
+                bond_direction=c.bond_direction,
             )
-            for c in _DEFAULT_GRID
+            for c in candidates
             for band in ("low", "high")
         )
 
     results = sweep(
         bars=bars, calendar=cal_window,
-        candidates=candidates, vix_filter=vix_filter,  # type: ignore[arg-type]
+        candidates=candidates,
+        vix_filter=vix_filter,  # type: ignore[arg-type]
+        bond_filter=bond_filter,
     )
 
     args.report.parent.mkdir(parents=True, exist_ok=True)
@@ -458,6 +562,7 @@ def main(argv: list[str] | None = None) -> int:
             "signal_time": r.candidate.signal_time_et,
             "eow_time": r.candidate.eow_time_et,
             "vix_band": r.candidate.vix_band or "",
+            "bond_direction": r.candidate.bond_direction or "",
             "n": r.n,
             "mean": r.mean,
             "std": r.std,

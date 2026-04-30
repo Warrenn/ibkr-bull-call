@@ -125,6 +125,37 @@
       ]
     },
     {
+      "name": "tlt_daily",
+      "status": "populated",
+      "source": "Yahoo Finance TLT daily OHLCV via yfinance",
+      "vendor": "Yahoo Finance",
+      "license": "Public free data; usage governed by Yahoo's terms (research-only single-seat is in scope)",
+      "acquired_at": "2026-04-30",
+      "path": "research/data/dataset-v1/tlt_daily.parquet",
+      "generator": "research/scripts/download_vix.py (--ticker TLT)",
+      "symbol": "TLT (iShares 20+ Year Treasury Bond ETF)",
+      "resolution": "daily OHLCV",
+      "date_range": {
+        "start": "2023-05-01",
+        "end": "2026-04-30"
+      },
+      "row_count": 753,
+      "checksum": "sha256:75ff23b04b3c28bf7eb536f55ff8cd4ee076fb35a1ba8f2f8239a0aa281db451",
+      "schema": [
+        "date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume"
+      ],
+      "known_limitations": [
+        "TLT is a 20+ year Treasury ETF — proxy for long-end yields. Sign of prior-day return = bond direction signal for v4-C bond gate.",
+        "Daily resolution — does not capture intraday bond direction (a 0DTE strategy might want intraday bond moves; deferred to Tier 2 if v4 holdout passes).",
+        "Same Yahoo-revision caveat as vix_daily."
+      ]
+    },
+    {
       "name": "vix_daily",
       "status": "populated",
       "source": "Yahoo Finance ^VIX daily OHLCV via yfinance",
