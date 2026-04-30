@@ -44,18 +44,31 @@ validation before live capital.
 ## Operational safety
 
 Every operational fail-safe is configurable via SSM (or env) and tested.
+The `R<n>` codes below are rule numbers from
+[`docs/strategy-review.md`](./docs/strategy-review.md) §7, which defines
+each rule and its intent in detail.
 
-| Protection | Setting(s) | Default | What it guards against |
-|---|---|---|---|
-| Reconcile on startup | always on | — | DDB wiped / SIGKILL crash leaving an open IBKR position with no local record |
-| Orphan-order cleanup at session start | always on | — | SIGKILL mid-entry leaving a working LMT at IBKR; next instance double-fills |
-| Data-outage emergency flatten (R23a) | `monitoringQuoteGraceSec`, `monitoringReconnectMaxAttempts`, `monitoringQuoteMaxBlindSec` | 15 / 3 / 60 | WS feed goes silent on an open 0DTE; bot re-subscribes, then MKT-flattens after the blind window |
-| Monthly net-negative capital gate (R9) | `monthlyStopOnNegativePnl` | `true` | Bad month bleeding into worse — no new entries until calendar rolls over |
-| Half-day skip | `skipHalfDays` | `true` | NYSE early 1 pm close coincides with default deadline; zero execution headroom |
-| SIGTERM-aware everything | always on | — | ASG/docker-stop blocked behind hung syscalls; daemon ignores graceful shutdown |
-| Session-level crash recovery + circuit breaker | `sessionErrorBackoffSec`, `sessionErrorMaxConsecutive` | 300 / 5 | Transient blip kills the daemon; ASG respawns + IBeam re-auth + 2FA = expensive |
-| Periodic heartbeat | `heartbeatIntervalSec` | 300 | CloudWatch can't tell quiet-by-design from frozen-process during long quiet stretches |
-| Settings cross-field validation | always on | — | SSM misconfig (e.g. deadline before entry time, POP > 1) silently produces a do-nothing daemon |
+| Protection | Setting(s) | What it guards against |
+|---|---|---|
+| Reconcile on startup | always on | DDB wiped / SIGKILL crash leaving an open IBKR position with no local record |
+| Orphan-order cleanup at session start | always on | SIGKILL mid-entry leaving a working LMT at IBKR; next instance double-fills |
+| Data-outage emergency flatten (R23a) | `monitoringQuoteGraceSec`, `monitoringReconnectMaxAttempts`, `monitoringQuoteMaxBlindSec` | WS feed goes silent on an open 0DTE; bot re-subscribes, then MKT-flattens after the blind window |
+| Monthly net-negative capital gate (R9) | `monthlyStopOnNegativePnl` | Bad month bleeding into worse — no new entries until calendar rolls over |
+| Half-day skip | `skipHalfDays` | NYSE early 1 pm close coincides with default deadline; zero execution headroom |
+| SIGTERM-aware everything | always on | ASG/docker-stop blocked behind hung syscalls; daemon ignores graceful shutdown |
+| Session-level crash recovery + circuit breaker | `sessionErrorBackoffSec`, `sessionErrorMaxConsecutive` | Transient blip kills the daemon; ASG respawns + IBeam re-auth + 2FA = expensive |
+| Periodic heartbeat | `heartbeatIntervalSec` | CloudWatch can't tell quiet-by-design from frozen-process during long quiet stretches |
+| Settings cross-field validation | always on | SSM misconfig (e.g. deadline before entry time, POP > 1) silently produces a do-nothing daemon |
+
+> **Default values** for each setting are intentionally NOT duplicated in
+> this table. The canonical sources are
+> [`infra/cloudformation/data.yaml`](./infra/cloudformation/data.yaml)
+> (deployed JSON) and `Settings` in
+> [`src/bull_call/config.py`](./src/bull_call/config.py) (dataclass
+> defaults — kept in sync via the `tests/test_config.py::test_load_with_defaults_and_required` test).
+> The Configuration table below lists current defaults at the time of
+> writing for orientation, but treat the linked files as authoritative
+> if there's any doubt.
 
 Stateful resources (`StateTable`, `ArtifactsBucket`) carry
 `DeletionPolicy: Retain` + `UpdateReplacePolicy: Retain`, so a stack
@@ -102,7 +115,7 @@ Strategy-side settings:
 | `entryTimeoutSec` (`ENTRY_TIMEOUT_SEC`) | `300` | Total budget per entry attempt; split 50/50 across initial-price + reprice phases |
 | `legFillTimeoutSec` (`LEG_FILL_TIMEOUT_SEC`) | `30` | Post-fill leg-balance verification timeout |
 | `stopEnabled` (`STOP_ENABLED`) | `true` | Master switch for the breakeven stop |
-| `stopLatestSec` (`STOP_LATEST_SEC`) | `30` | Suppress stop fire in last N seconds before close |
+| `stopLatestSec` (`STOP_LATEST_SEC`) | `30` | Suppress stop execution in the last N seconds before close |
 
 Operational-safety settings (see table above for what each guards):
 
