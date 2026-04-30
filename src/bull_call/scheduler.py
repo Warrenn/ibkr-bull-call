@@ -25,6 +25,7 @@ from bull_call.cpapi.chain import fetch_0dte_call_chain, fetch_spot
 from bull_call.cpapi.client import connect, disconnect, select_account_id
 from bull_call import events
 from bull_call.cpapi.execution import (
+    cancel_orphaned_combo_orders,
     flatten_unmatched_leg as cp_flatten_unmatched_leg,
 )
 from bull_call.cpapi.execution import (
@@ -90,6 +91,30 @@ class Scheduler:
         # already open on the account into the local store, so the retry
         # loop won't double-open if the state DB was wiped.
         self._reconcile_with_ibkr(today_et)
+
+        # Belt-and-suspenders: cancel any working combo orders left over
+        # from a prior crashed run. Reconcile only catches FILLED positions;
+        # a SIGKILL mid-fill leaves the order working at IBKR with no DDB
+        # record, and the next entry attempt could submit alongside it and
+        # double-fill (exceeding max_loss_usd). Yesterday's TIF=DAY orders
+        # auto-cancelled at the 4 pm close, so any working combo at session
+        # start is necessarily an intra-day orphan from this same calendar
+        # day.
+        assert self._client is not None and self._account_id is not None
+        try:
+            n_cancelled = cancel_orphaned_combo_orders(
+                self._client, account_id=self._account_id,
+            )
+            if n_cancelled:
+                events.emit(
+                    "orphaned_orders_cancelled",
+                    count=n_cancelled,
+                )
+        except Exception:
+            log.warning(
+                "orphan-order cleanup raised; continuing into entry loop",
+                exc_info=True,
+            )
 
         gate_active = self._monthly_gate_active(today_et)
         if gate_active:
