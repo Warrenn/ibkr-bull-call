@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from ibind import IbkrClient
+
+from bull_call.cpapi import ShutdownRequested
 
 log = logging.getLogger(__name__)
 
@@ -22,8 +25,18 @@ class GatewayConfig:
     cacert: str | bool = False  # IBeam uses a self-signed cert; False disables verification
 
 
-def connect(config: GatewayConfig | None = None, *, ready_timeout_s: float = 120.0) -> IbkrClient:
-    """Build an ``IbkrClient`` and block until the gateway reports authenticated."""
+def connect(
+    config: GatewayConfig | None = None,
+    *,
+    ready_timeout_s: float = 120.0,
+    should_stop_fn: Callable[[], bool] = lambda: False,
+) -> IbkrClient:
+    """Build an ``IbkrClient`` and block until the gateway reports authenticated.
+
+    ``should_stop_fn`` is checked between auth polls so a SIGTERM during
+    the up-to-120s startup wait exits promptly with a RuntimeError instead
+    of blocking the daemon for the full window.
+    """
 
     cfg = config or GatewayConfig()
     client = IbkrClient(url=cfg.base_url, cacert=cfg.cacert)
@@ -31,6 +44,10 @@ def connect(config: GatewayConfig | None = None, *, ready_timeout_s: float = 120
     deadline = time.monotonic() + ready_timeout_s
     last_err: Exception | None = None
     while time.monotonic() < deadline:
+        if should_stop_fn():
+            raise ShutdownRequested(
+                "shutdown requested before gateway became ready"
+            )
         try:
             status = client.check_auth_status()
             if status.data.get("authenticated") and status.data.get("connected"):

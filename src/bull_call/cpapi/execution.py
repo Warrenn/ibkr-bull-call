@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections.abc import Callable
 from typing import Any
 
 from ibind import IbkrClient, OrderRequest, QuestionType
@@ -109,6 +110,7 @@ def submit_entry_lmt(
     min_profit_to_loss_ratio: float | None = None,
     timeout_s: float = 300.0,
     reprice_step: float = 0.05,
+    should_stop_fn: Callable[[], bool] = lambda: False,
 ) -> FillReport:
     """Submit a BUY combo LMT at midpoint debit; reprice once toward debit_max
     if unfilled; cancel and report unfilled if still no go.
@@ -163,9 +165,18 @@ def submit_entry_lmt(
     place_resp = client.place_order(order_request=order, answers=_DEFAULT_ANSWERS, account_id=account_id)
     order_id = _extract_order_id(place_resp.data)
 
-    fill = _await_fill(client, order_id, phase_timeout)
+    fill = _await_fill(client, order_id, phase_timeout, should_stop_fn=should_stop_fn)
     if fill is not None:
         return FillReport(filled=True, avg_fill_price=fill, order_id=order_id)
+
+    if should_stop_fn():
+        # Shutdown bailed us out of phase 1; cancel the working order and exit.
+        if order_id is not None:
+            try:
+                client.cancel_order(order_id=order_id, account_id=account_id)
+            except Exception as exc:
+                log.warning("cancel failed for %s: %s", order_id, exc)
+        return FillReport(filled=False, avg_fill_price=math.nan, order_id=order_id)
 
     new_price = min(safe_debit_max, _round_tick(initial_price + reprice_step))
     if new_price > initial_price and order_id is not None:
@@ -179,7 +190,7 @@ def submit_entry_lmt(
             answers=_DEFAULT_ANSWERS,
             account_id=account_id,
         )
-        fill = _await_fill(client, order_id, phase_timeout)
+        fill = _await_fill(client, order_id, phase_timeout, should_stop_fn=should_stop_fn)
         if fill is not None:
             return FillReport(filled=True, avg_fill_price=fill, order_id=order_id)
 
@@ -188,7 +199,10 @@ def submit_entry_lmt(
             client.cancel_order(order_id=order_id, account_id=account_id)
         except Exception as exc:
             log.warning("cancel failed for %s: %s", order_id, exc)
-    log.warning("entry LMT not filled within budget; cancelled")
+    if should_stop_fn():
+        log.info("entry LMT %s cancelled on shutdown request", order_id)
+    else:
+        log.warning("entry LMT not filled within budget; cancelled")
     return FillReport(filled=False, avg_fill_price=math.nan, order_id=order_id)
 
 
@@ -199,8 +213,14 @@ def submit_close_market(
     long_leg: OptionContract,
     short_leg: OptionContract,
     timeout_s: float = 15.0,
+    should_stop_fn: Callable[[], bool] = lambda: False,
 ) -> FillReport:
-    """Close the spread at market: SELL long, BUY back short, atomically."""
+    """Close the spread at market: SELL long, BUY back short, atomically.
+
+    ``should_stop_fn`` is checked between fill polls so a SIGTERM mid-close
+    exits promptly. The submitted order is left working at IBKR — the next
+    instance's reconcile-on-startup will adopt the resulting position state.
+    """
 
     conidex = _conidex(long_leg, short_leg)
     order = OrderRequest(
@@ -216,10 +236,17 @@ def submit_close_market(
     place_resp = client.place_order(order_request=order, answers=_DEFAULT_ANSWERS, account_id=account_id)
     order_id = _extract_order_id(place_resp.data)
 
-    fill = _await_fill(client, order_id, timeout_s)
+    fill = _await_fill(client, order_id, timeout_s, should_stop_fn=should_stop_fn)
     if fill is not None:
         return FillReport(filled=True, avg_fill_price=fill, order_id=order_id)
-    log.error("close MKT did not fill within %ds; order left working", timeout_s)
+    if should_stop_fn():
+        log.info(
+            "close MKT %s left working at IBKR (graceful shutdown); "
+            "next instance will reconcile",
+            order_id,
+        )
+    else:
+        log.error("close MKT did not fill within %ds; order left working", timeout_s)
     return FillReport(filled=False, avg_fill_price=math.nan, order_id=order_id)
 
 
@@ -251,15 +278,22 @@ def verify_legs_balanced(
     short_leg: OptionContract,
     timeout_s: float = 30.0,
     poll_interval_s: float = 2.0,
+    should_stop_fn: Callable[[], bool] = lambda: False,
 ) -> bool:
     """Poll until both legs of the spread match (long: +1, short: -1).
 
     Returns True if balanced within the timeout, else False (caller should
-    flatten the unmatched leg).
+    flatten the unmatched leg). ``should_stop_fn`` is checked between polls
+    so a SIGTERM mid-verification exits within one poll interval; the
+    caller will see ``False`` and choose its shutdown path — but the next
+    instance's reconcile-on-startup will detect any actual leg-out state.
     """
 
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
+        if should_stop_fn():
+            log.info("shutdown requested while verifying leg balance; exiting")
+            return False
         long_qty = _qty_for_conid(client, account_id=account_id, conid=long_leg.conid)
         short_qty = _qty_for_conid(client, account_id=account_id, conid=short_leg.conid)
         if long_qty == 1 and short_qty == -1:
@@ -334,11 +368,28 @@ def _extract_order_id(data: Any) -> str | None:
     return None
 
 
-def _await_fill(client: IbkrClient, order_id: str | None, timeout_s: float) -> float | None:
+def _await_fill(
+    client: IbkrClient,
+    order_id: str | None,
+    timeout_s: float,
+    *,
+    should_stop_fn: Callable[[], bool] = lambda: False,
+) -> float | None:
+    """Poll ``order_status`` until filled, terminal, or timeout.
+
+    Returns the average fill price on Filled, ``None`` on cancel/inactive/
+    reject, timeout, or shutdown. ``should_stop_fn()`` is checked at the
+    top of every poll so a SIGTERM mid-fill exits within one poll interval
+    (~0.5s) instead of running out the full ``timeout_s``.
+    """
+
     if order_id is None:
         return None
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
+        if should_stop_fn():
+            log.info("shutdown requested while awaiting fill on %s", order_id)
+            return None
         try:
             status = client.order_status(order_id=order_id)
             data = status.data or {}
