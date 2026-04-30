@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 from bull_call.config import Settings
-from bull_call.scheduler import Scheduler, _heartbeat_loop
+from bull_call.scheduler import Scheduler, _ET, _heartbeat_loop
 from bull_call.state import Store
 
 
@@ -359,6 +359,223 @@ def test_run_forever_resets_consecutive_counter_on_success(
     assert breaker_records == [], (
         "circuit breaker fired despite successful sessions resetting the counter"
     )
+
+
+# ---------- entry-time computation -----------------------------------------
+
+
+def test_entry_time_for_returns_none_on_non_trading_day(store: Store) -> None:
+    """Saturday (NYSE closed) returns None — caller knows to skip ahead
+    to the next trading day."""
+
+    sched = Scheduler(_settings(entry_time_et=dt.time(10, 30)), store)
+    saturday = dt.date(2026, 5, 2)  # 2026-05-02 is a Saturday
+    assert sched._entry_time_for(saturday) is None
+
+
+def test_entry_time_for_returns_utc_on_trading_day(store: Store) -> None:
+    """Wed Apr 29 2026 + ENTRY_TIME_ET=10:30 → UTC equivalent during DST
+    is 14:30 UTC."""
+
+    sched = Scheduler(_settings(entry_time_et=dt.time(10, 30)), store)
+    weekday = dt.date(2026, 4, 29)  # trading day
+    result = sched._entry_time_for(weekday)
+    assert result is not None
+    # Eastern is EDT (UTC-4) on this date; 10:30 ET = 14:30 UTC.
+    assert result.tzinfo == dt.timezone.utc
+    assert result.hour == 14
+    assert result.minute == 30
+
+
+def test_next_entry_time_returns_today_when_pre_entry(store: Store) -> None:
+    """Now is BEFORE today's entry time and today is a trading day —
+    today's entry time is the next opportunity."""
+
+    sched = Scheduler(_settings(entry_time_et=dt.time(10, 30)), store)
+    # 2026-04-29 09:00 UTC ≈ 05:00 ET — well before the 10:30 ET entry.
+    now = dt.datetime(2026, 4, 29, 9, 0, tzinfo=dt.timezone.utc)
+    next_entry = sched._next_entry_time(now)
+    assert next_entry.astimezone(_ET).date() == dt.date(2026, 4, 29)
+    assert next_entry.astimezone(_ET).time() == dt.time(10, 30)
+
+
+def test_next_entry_time_skips_to_tomorrow_when_past_entry(store: Store) -> None:
+    """Now is AFTER today's entry time → roll forward to next trading
+    day's entry time."""
+
+    sched = Scheduler(_settings(entry_time_et=dt.time(10, 30)), store)
+    # 2026-04-29 20:00 UTC = 16:00 ET, after entry has passed
+    now = dt.datetime(2026, 4, 29, 20, 0, tzinfo=dt.timezone.utc)
+    next_entry = sched._next_entry_time(now)
+    next_et_date = next_entry.astimezone(_ET).date()
+    # Should land on 2026-04-30 (Thursday).
+    assert next_et_date == dt.date(2026, 4, 30)
+    assert next_entry.astimezone(_ET).time() == dt.time(10, 30)
+
+
+def test_next_entry_time_skips_weekend(store: Store) -> None:
+    """Friday late afternoon → next entry rolls to Monday, not Saturday."""
+
+    sched = Scheduler(_settings(entry_time_et=dt.time(10, 30)), store)
+    friday_pm = dt.datetime(2026, 5, 1, 22, 0, tzinfo=dt.timezone.utc)
+    next_entry = sched._next_entry_time(friday_pm)
+    next_et_date = next_entry.astimezone(_ET).date()
+    # 2026-05-04 is Monday.
+    assert next_et_date == dt.date(2026, 5, 4)
+
+
+# ---------- sleep_until ------------------------------------------------------
+
+
+def test_sleep_until_returns_true_when_target_already_passed(store: Store) -> None:
+    """If the target is in the past, _sleep_until returns True immediately
+    without ever waiting."""
+
+    sched = Scheduler(_settings(), store)
+    past = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)
+
+    wall_before = time.monotonic()
+    result = sched._sleep_until(past)
+    elapsed = time.monotonic() - wall_before
+
+    assert result is True
+    assert elapsed < 0.1  # didn't actually sleep
+
+
+def test_sleep_until_returns_false_when_stop_already_set(store: Store) -> None:
+    """If _stop_event is already set when called, returns False without
+    sleeping."""
+
+    sched = Scheduler(_settings(), store)
+    sched._stop_event.set()
+    far_future = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)
+
+    wall_before = time.monotonic()
+    result = sched._sleep_until(far_future)
+    elapsed = time.monotonic() - wall_before
+
+    assert result is False
+    assert elapsed < 0.1
+
+
+def test_sleep_until_returns_false_when_stop_set_during_sleep(store: Store) -> None:
+    """If shutdown is signalled while we're waiting, return False as
+    soon as Event.wait returns. Use a thread to set the event after a
+    short delay."""
+
+    sched = Scheduler(_settings(), store)
+    target = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=10)
+
+    def signal_stop_soon() -> None:
+        time.sleep(0.05)
+        sched._stop_event.set()
+
+    t = threading.Thread(target=signal_stop_soon, daemon=True)
+    t.start()
+
+    wall_before = time.monotonic()
+    result = sched._sleep_until(target)
+    elapsed = time.monotonic() - wall_before
+    t.join(timeout=1.0)
+
+    assert result is False
+    assert elapsed < 1.0  # well under the 10s target
+
+
+# ---------- reconcile -------------------------------------------------------
+
+
+def test_reconcile_adopts_detected_spreads(
+    store: Store, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When detect_existing_spreads returns a spread, the scheduler adopts
+    it into the local store with adopted_from_ibkr=True."""
+
+    from bull_call.chain import OptionContract
+    from bull_call.cpapi.reconcile import ExistingSpread
+
+    sched = Scheduler(_settings(), store)
+    sched._client = object()  # type: ignore[assignment]
+    sched._account_id = "A1"
+
+    detected = [
+        ExistingSpread(
+            symbol="SPX",
+            long_leg=OptionContract(strike=4995.0, conid=111, right="C", expiry="20260429"),
+            short_leg=OptionContract(strike=5005.0, conid=222, right="C", expiry="20260429"),
+            entry_debit=550.0,
+        ),
+    ]
+    monkeypatch.setattr(
+        "bull_call.scheduler.detect_existing_spreads",
+        lambda _client, *, account_id, today_et: detected,
+    )
+
+    sched._reconcile_with_ibkr(dt.date(2026, 4, 29))
+
+    rec = store.get_spread("2026-04-29#SPX")
+    assert rec.long_strike == 4995.0
+    assert rec.short_strike == 5005.0
+    assert rec.adopted_from_ibkr is True
+
+
+def test_reconcile_no_op_when_nothing_detected(
+    store: Store, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty list → no DDB writes, no events."""
+
+    sched = Scheduler(_settings(), store)
+    sched._client = object()  # type: ignore[assignment]
+    sched._account_id = "A1"
+
+    monkeypatch.setattr(
+        "bull_call.scheduler.detect_existing_spreads",
+        lambda _client, *, account_id, today_et: [],
+    )
+
+    sched._reconcile_with_ibkr(dt.date(2026, 4, 29))
+    assert not store.has_trade_today("2026-04-29")
+
+
+def test_reconcile_skips_already_opened_today(
+    store: Store, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the local store already has a row for today's symbol (e.g.
+    bot just opened it before reconcile somehow ran again), skip the
+    adoption silently — the existing row wins."""
+
+    from bull_call.chain import OptionContract
+    from bull_call.cpapi.reconcile import ExistingSpread
+
+    sched = Scheduler(_settings(), store)
+    sched._client = object()  # type: ignore[assignment]
+    sched._account_id = "A1"
+
+    # Pre-populate the store as if the bot already opened today's spread
+    # via the normal entry path.
+    store.record_open(
+        date="2026-04-29", symbol="SPX",
+        long_strike=4995.0, short_strike=5005.0, debit=5.50,
+        opened_at="2026-04-29T14:30:00+00:00",
+    )
+
+    detected = [
+        ExistingSpread(
+            symbol="SPX",
+            long_leg=OptionContract(strike=4995.0, conid=111, right="C", expiry="20260429"),
+            short_leg=OptionContract(strike=5005.0, conid=222, right="C", expiry="20260429"),
+            entry_debit=550.0,
+        ),
+    ]
+    monkeypatch.setattr(
+        "bull_call.scheduler.detect_existing_spreads",
+        lambda _client, *, account_id, today_et: detected,
+    )
+
+    # Should be a no-op — the existing record stays untouched.
+    sched._reconcile_with_ibkr(dt.date(2026, 4, 29))
+    rec = store.get_spread("2026-04-29#SPX")
+    assert rec.adopted_from_ibkr is False  # original record, NOT adopted
 
 
 @pytest.mark.parametrize(
