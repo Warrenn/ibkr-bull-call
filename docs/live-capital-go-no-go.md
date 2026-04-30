@@ -387,12 +387,46 @@ Test the marginal impact of:
 - liquidity filters
 - **strike-selection objective** — see §5.A below
 - **stop logic** — see §5.B below
+- **profit-taking policy** — see §5.C below
+- **rolling policy** — see §5.D below
 - time stop
-- profit-taking
 - hard close rules
 
 Rules that do not improve out-of-sample expectancy, drawdown, or robustness
 under stress should be removed.
+
+#### 5.0 Ablation cardinality and the role of paper trading
+
+The four candidate axes (§5.A strikes, §5.B stops, §5.C profit-taking,
+§5.D rolling) each carry 4–5 variants including their controls. A naïve
+full Cartesian explores `5 × 5 × 5 × 4 = 500`-plus cells — operationally
+impossible to backtest meaningfully and statistically infeasible to
+paper-trade.
+
+The §6.4 procedure is **authoritative** and caps this to ~30–50 ablations:
+
+1. Establish a *control* configuration (minimal rules — current defaults
+   on each axis or simplest variant).
+2. For each candidate filter / exit rule independently, measure the
+   marginal contribution by **adding it alone to the control** and
+   re-running. That's `5 + 5 + 5 + 4 ≈ 19` cells.
+3. Then test in pairs and triples — interactions matter (e.g. mark-based
+   stop and trailing PT can compound or cancel). Pick a small set of
+   interaction tests guided by §6.4 step 2 winners; do **not** Cartesian.
+4. **Remove any rule that improves backtest appearance but not
+   out-of-sample expectancy** under the §6.5 walk-forward methodology.
+5. Prefer fewer rules. A 3-rule strategy that beats a 7-rule one out of
+   sample is the keeper.
+
+**Paper-trading variant cap.** Paper trading is the validation of
+**one** frozen spec, not a parallel hypothesis-discovery channel. The
+backtest harness (§1.5.2) is where the four axes get explored on years
+of data; paper trades only the *winner* (or, if backtest produces 2
+specs with overlapping CIs on ranked metrics, the **2-3 close rivals**
+to break the tie). Paper-trading more than 3 variants concurrently
+fragments the trade pool below §6.5's bootstrap-CI floor and multiplies
+operational overhead (one bot instance, one DDB table, one CloudWatch
+alarm set per variant) without producing additional statistical power.
 
 #### 5.A Strike-selection objective ablation (mandatory)
 
@@ -459,6 +493,93 @@ expose the strike-selection objective AND the stop variant as first-class
 config knobs that the ablation runner can toggle. Without that, ablation
 results are not reproducible and the spec-freeze rule (§1.5.4) cannot be
 enforced.
+
+#### 5.C Profit-taking policy ablation (mandatory)
+
+The current production code has **no profit-taking** — spreads are held
+to settlement (or a stop fires). `strategy-review.md` §2.5 / §4.9 flags
+this as a candidate weakness — long 0DTE spreads are highly exposed to
+late-day gamma reversal — but also explicitly warns that the canonical
+"close at 50% of max profit" rule is associated with **short-premium**
+strategies (selling iron condors, strangles) where premium decay drives
+expectancy. Long debit spreads have a different convexity profile: you
+have already *paid* for the gamma, so leaving early gives away the
+upside you paid for. The right target — 25%, 50%, 75% of max profit, or
+trailed from a peak — is an **empirical question, not a settled rule**.
+
+Before live capital, the ablation must compare:
+
+| Variant | Trigger | Source |
+|---|---|---|
+| `no_pt` (control) | Hold to settlement / stop / time-stop. Mandatory baseline per §6.4. | n/a |
+| `fixed_pt_at_50_max_profit` | Close MKT when `executable_credit ≥ entry_debit + 0.50 × (width − entry_debit)`. **Starting hypothesis only**; 25 / 50 / 65 / 75% should each be tested as separate cells. | strategy-review.md §4.9 / §7 R24 |
+| `time_gated_pt` | PT only fires *after* `pt_arm_time_et` (e.g. 13:00 ET) — the rationale being that early-session PT closes give away the post-entry drift that motivated the trade in the first place. | strategy-review.md §4.9 |
+| `trailing_pt_from_peak` | Track the peak `executable_credit` since entry; close when current `executable_credit` ≤ peak × `trail_giveback_pct` (starting hypothesis 0.50 — once 75% of max profit is reached, lock in 50%). | strategy-review.md §4.9 |
+
+Each PT variant **must be evaluated jointly with each stop variant from
+§5.B** — stops and PT cannot be ablated in isolation because they
+interact mechanically (a stop that fires on a downward move can preempt
+a PT that would have fired on a recovery, and vice-versa). This is a
+deliberate interaction-test pair — not a Cartesian — driven by the
+§5.B winner.
+
+**Pass criterion**: a PT variant wins only if it beats `no_pt` on the
+holdout on **expectancy AND drawdown AND time-underwater**. A PT rule
+that improves drawdown but materially reduces expectancy is rejected
+unless the drawdown reduction crosses the §6.6 acceptability threshold —
+debit spreads have already paid for the gamma, so giving up upside is
+expensive.
+
+#### 5.D Rolling policy ablation (mandatory)
+
+The current production code has **no rolling** — once a position is
+opened, the only exits are the stop, time stop, hard close, settlement,
+leg-out flatten, or data-outage flatten. Rolling (closing the current
+spread and opening a fresh one farther in time or at different strikes)
+is an architecturally larger change than the other three axes:
+
+- It changes the **trade-count and exposure profile** within a session
+  — interacts with sizing (R8 weekly loss cap, R9 monthly net-negative
+  gate) because each roll is two round-trip commissions on top of the
+  original entry, and a roll into a new debit increases the day's
+  cumulative risk.
+- Whether a roll is even *possible* depends on liquidity at the new
+  strikes and on time-to-close (rolling at 14:30 ET into a still-0DTE
+  spread leaves no room for the new spread to work).
+- The candidate set is naturally smaller because the operational risk
+  is higher; a positive expectancy result must clear a higher bar.
+
+This axis should be ablated **last**, after §5.A / §5.B / §5.C have
+produced their winners, because rolling decisions consume the
+strike-selection / stop / PT machinery and a rolling rule that wins
+against a weak control may lose against a strong one.
+
+| Variant | Trigger | Source |
+|---|---|---|
+| `no_roll` (control) | Existing exits only. Mandatory baseline per §6.4. | n/a |
+| `single_defensive_roll_with_confirmation` | One roll per session, at most. Triggered when `executable_credit ≤ entry_debit × roll_threshold_pct` (starting hypothesis 0.50) AND held for `roll_confirm_sec` (starting 60s). New strikes selected via the §5.A winner. **Hard limit**: not after `latest_roll_et` (e.g. 14:00 ET) — rolling late leaves no holding time for the new spread. | new-territory hypothesis |
+| `mark_driven_salvage_roll` | Same trigger as above but rolls into an OTM debit spread sized so the **combined** entry + roll cost still fits inside R8/R9 caps. Goal: salvage the position rather than realise the loss. | new-territory hypothesis |
+| `regime_gated_midday_roll` | A roll fires only if (a) the §5.A trigger above is met AND (b) the regime conditions that justified the original entry **still hold** (per the regime filters). If the regime that motivated entry has degraded, accept the loss instead of doubling down. | new-territory hypothesis |
+
+Each rolling variant must report, in addition to the standard §6.3
+metrics, **roll-frequency** (rolls per filled spread), **post-roll
+expectancy** (P&L attributable to the rolled spread, separated from the
+original), and **interaction with §5.B stop**: a stop that fires
+post-roll on the new strikes vs the original strikes is reported
+separately.
+
+**Pass criterion**: a rolling variant wins only if it beats `no_roll`
+on **expectancy AND max single-day cumulative loss AND roll-frequency
+operational tractability**. Roll frequency below 1-per-week is fine;
+roll frequency above ~2-per-week likely indicates the rolling rule is
+papering over a deeper edge problem (the entry signal is weak, not the
+exit). If rolling beats no-roll only by recovering occasional outliers,
+the result must survive §6.5's bootstrap-CI test before adoption.
+
+**Implementation note for §5.C and §5.D**: the harness from §1.5.2
+must expose the PT variant AND the rolling variant as first-class
+config knobs (matching §5.A / §5.B), and the four axes must be
+toggleable independently per the §5.0 cardinality discipline.
 
 ### Phase 6: Stress everything
 
