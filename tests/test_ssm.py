@@ -195,6 +195,157 @@ def test_fetch_unknown_keys_ignored(ssm_client: object) -> None:
     assert overrides == {"MAX_LOSS_USD": "200"}
 
 
+# ---------- error / shape edge cases on fetch_settings_overrides -----------
+
+
+def test_fetch_settings_reraises_unrelated_get_parameter_errors(
+    ssm_client: object,
+) -> None:
+    """Anything other than ParameterNotFound (network error, IAM denial,
+    throttling) propagates verbatim — caller decides what to do."""
+
+    stubber = Stubber(ssm_client)  # type: ignore[arg-type]
+    stubber.add_client_error(
+        "get_parameter",
+        service_error_code="AccessDeniedException",
+        http_status_code=403,
+    )
+    with stubber, pytest.raises(Exception, match="AccessDenied"):
+        fetch_settings_overrides(ssm_client, prefix="/dev/ibkr-bull-call")
+
+
+def test_fetch_settings_rejects_non_object_json(ssm_client: object) -> None:
+    """A JSON list / scalar at the top level is unusable — the loader
+    expects a JSON object so each key can map to a Settings field."""
+
+    settings_value = json.dumps([1, 2, 3])
+    stubber = Stubber(ssm_client)  # type: ignore[arg-type]
+    stubber.add_response(
+        "get_parameter",
+        {"Parameter": {"Name": "/dev/ibkr-bull-call/settings", "Type": "String", "Value": settings_value}},
+        {"Name": "/dev/ibkr-bull-call/settings", "WithDecryption": False},
+    )
+    with stubber, pytest.raises(ValueError, match="JSON object"):
+        fetch_settings_overrides(ssm_client, prefix="/dev/ibkr-bull-call")
+
+
+def test_fetch_settings_format_value_handles_string_passthrough(
+    ssm_client: object,
+) -> None:
+    """A JSON string value passes through to the env override unchanged
+    (covers the fall-through branch in _format_value when value is
+    neither bool nor numeric)."""
+
+    settings_value = json.dumps({
+        "maxLossUsd": 200,
+        "logLevel": "DEBUG",  # string, exercises the str() fall-through
+    })
+    stubber = Stubber(ssm_client)  # type: ignore[arg-type]
+    stubber.add_response(
+        "get_parameter",
+        {"Parameter": {"Name": "/dev/ibkr-bull-call/settings", "Type": "String", "Value": settings_value}},
+        {"Name": "/dev/ibkr-bull-call/settings", "WithDecryption": False},
+    )
+    with stubber:
+        overrides = fetch_settings_overrides(ssm_client, prefix="/dev/ibkr-bull-call")
+    assert overrides["LOG_LEVEL"] == "DEBUG"
+
+
+# ---------- fetch_credentials (the unguarded credential surface) ------------
+
+
+def test_fetch_credentials_returns_userid_and_password(
+    ssm_client: object,
+) -> None:
+    """The happy path: both SecureStrings come back, returned as a
+    _Credentials wrapper whose .clear() can later wipe them."""
+
+    from bull_call.ssm import fetch_credentials
+
+    stubber = Stubber(ssm_client)  # type: ignore[arg-type]
+    stubber.add_response(
+        "get_parameters",
+        {
+            "Parameters": [
+                {"Name": "/dev/ibkr-bull-call/tws_userid", "Value": "ibkr_user"},
+                {"Name": "/dev/ibkr-bull-call/tws_password", "Value": "ibkr_pass"},
+            ],
+            # Stubber rejects an empty list here — omit when no invalids.
+        },
+        {
+            "Names": [
+                "/dev/ibkr-bull-call/tws_userid",
+                "/dev/ibkr-bull-call/tws_password",
+            ],
+            "WithDecryption": True,
+        },
+    )
+    with stubber:
+        creds = fetch_credentials(ssm_client, prefix="/dev/ibkr-bull-call")
+    assert creds.userid == "ibkr_user"
+    assert creds.password == "ibkr_pass"
+
+
+def test_fetch_credentials_strips_trailing_slash() -> None:
+    """``prefix`` may or may not have a trailing slash; the function
+    strips it so we don't generate ``/dev/ibkr-bull-call//tws_userid``."""
+
+    captured: dict[str, Any] = {}
+
+    class FakeSsm:
+        def get_parameters(self, *, Names: list[str], WithDecryption: bool) -> dict:
+            captured["Names"] = Names
+            return {
+                "Parameters": [
+                    {"Name": Names[0], "Value": "u"},
+                    {"Name": Names[1], "Value": "p"},
+                ],
+                "InvalidParameters": [],
+            }
+
+    from bull_call.ssm import fetch_credentials
+
+    fetch_credentials(FakeSsm(), prefix="/dev/ibkr-bull-call/")
+    assert captured["Names"] == [
+        "/dev/ibkr-bull-call/tws_userid",
+        "/dev/ibkr-bull-call/tws_password",
+    ]
+
+
+def test_fetch_credentials_raises_when_get_parameters_fails() -> None:
+    """Network / IAM / throttling — wrap as MissingParameterError so
+    callers can distinguish "didn't reach SSM" from "param missing"."""
+
+    from bull_call.ssm import MissingParameterError, fetch_credentials
+
+    class FakeSsm:
+        def get_parameters(self, **_: Any) -> dict:
+            raise RuntimeError("network blip")
+
+    with pytest.raises(MissingParameterError, match="failed to fetch"):
+        fetch_credentials(FakeSsm(), prefix="/dev/ibkr-bull-call")
+
+
+def test_fetch_credentials_raises_when_params_invalid() -> None:
+    """If SSM reports any of the names as invalid, refuse — handing
+    IBeam half a credential pair would just fail later in a confusing
+    way."""
+
+    from bull_call.ssm import MissingParameterError, fetch_credentials
+
+    class FakeSsm:
+        def get_parameters(self, **_: Any) -> dict:
+            return {
+                "Parameters": [
+                    {"Name": "/dev/ibkr-bull-call/tws_userid", "Value": "u"},
+                ],
+                "InvalidParameters": ["/dev/ibkr-bull-call/tws_password"],
+            }
+
+    with pytest.raises(MissingParameterError, match="missing or undecryptable"):
+        fetch_credentials(FakeSsm(), prefix="/dev/ibkr-bull-call")
+
+
 def test_load_settings_via_ssm_end_to_end(ssm_client: object) -> None:
     settings_value = json.dumps({
         "maxLossUsd": 200,
