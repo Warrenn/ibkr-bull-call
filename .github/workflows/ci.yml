@@ -33,8 +33,16 @@ jobs:
       - name: Install Python + dev deps
         run: uv sync --extra dev
 
-      - name: Run test suite
-        run: uv run pytest -q
+      - name: Run test suite + coverage gate
+        # Fail CI if total coverage drops below the floor. The floor
+        # is set just under the current 89% — high enough to catch a
+        # significant regression, low enough that adding a new
+        # production module without tests at the same time gives a
+        # reasonable few-day grace before this trips. Bump the floor
+        # whenever a coverage PR meaningfully raises the actual.
+        run: |
+          uv pip install pytest-cov
+          uv run pytest -q --cov=src/bull_call --cov-fail-under=85
 
       - name: Type-check (mypy)
         # boto3 / ibind / scipy / pandas / pandas_market_calendars have
