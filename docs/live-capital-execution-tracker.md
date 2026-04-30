@@ -108,6 +108,22 @@ These are the items worth doing immediately.
   bullish-continuation hypothesis is killed. Project either pivots
   to a different signal family (v3) or stops.
 
+  **v3 update (2026-04-30, PR #59 + #60)**: pivoted to v3 with VIX
+  regime gate. v3 train sweep found high-VIX subset of v2 candidates
+  showed t=+3.05 (sharper than v2's +2.92). Froze v3 spec at
+  0.50%/10:30 + event filter + high-VIX (prior-day VIX ≥ 14.84
+  median split on TRAIN). Validation result IDENTICAL to v2: all 12
+  validation trades already had prior-day VIX ≥ 14.84 (validation
+  period coincided with April 2025 tariff turmoil; VIX hit 52). New
+  v3 outlier rule (`one_outlier_explains_more_than_75_pct_of_mean`)
+  fires: 9.05% / 10.13% = 89% from 2025-04-09 alone. v3 KILLED by
+  its own decision rules; holdout slot preserved (never touched).
+  Three specs (v1, v2, v3) have all failed falsification on
+  dataset-v1. Without 2025-04-09, all three return to "borderline
+  flat" (~+0.10%). The bullish-intraday-continuation hypothesis is
+  dead in three different ways. See `docs/STRATEGY-SPEC-v3.md`,
+  `research/reports/directional-edge-v3-validation.md`.
+
 ## NEXT
 
 Do these only if the `NOW` block clears.
