@@ -199,24 +199,45 @@ def _scheduler_with_session_results(
     return sched, calls
 
 
-class _StubSleep:
-    """Captures `_sleep_until` calls without actually sleeping."""
+@pytest.fixture
+def stub_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the gateway-lifecycle calls so run_forever can be exercised
+    without an actual IBKR gateway. Used by every session-recovery test."""
 
-    def __init__(self) -> None:
-        self.calls: list[Any] = []
+    monkeypatch.setattr("bull_call.scheduler.connect", lambda **kw: object())
+    monkeypatch.setattr("bull_call.scheduler.select_account_id", lambda _c: "A1")
+    monkeypatch.setattr("bull_call.scheduler.disconnect", lambda _c: None)
 
-    def __call__(self, target: Any) -> bool:
-        self.calls.append(target)
-        return True
+
+def _record_wait_timeouts(
+    monkeypatch: pytest.MonkeyPatch, sched: Scheduler,
+) -> list[float | None]:
+    """Replace ``sched._stop_event.wait`` with a recorder that returns
+    True (so the wait completes immediately) once shutdown is requested
+    and False otherwise — preserves loop semantics while exposing the
+    timeout values the recovery code is requesting."""
+
+    timeouts: list[float | None] = []
+    stop_event = sched._stop_event
+    real_is_set = stop_event.is_set
+
+    def fake_wait(timeout: float | None = None) -> bool:
+        timeouts.append(timeout)
+        return real_is_set()
+
+    monkeypatch.setattr(stop_event, "wait", fake_wait)
+    return timeouts
 
 
 def test_run_forever_recovers_from_transient_session_error(
-    store: Store, monkeypatch: pytest.MonkeyPatch,
+    store: Store,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    stub_gateway: None,
 ) -> None:
-    """A single transient exception in `_run_one_session` is caught,
-    logged, the loop sleeps briefly, then continues. The next session
-    runs successfully and the daemon exits cleanly when shutdown is
-    requested."""
+    """A single transient exception is caught, the recovery code emits a
+    ``session_error`` event, sleeps for the configured backoff, and the
+    loop continues to the next session."""
 
     settings = _settings(
         session_error_backoff_sec=300,
@@ -225,32 +246,35 @@ def test_run_forever_recovers_from_transient_session_error(
     sched, calls = _scheduler_with_session_results(
         store, settings, [RuntimeError("transient blip"), None],
     )
-
-    # Stub out the gateway side-effects so run_forever can execute.
-    monkeypatch.setattr(
-        "bull_call.scheduler.connect", lambda **kw: object(),
-    )
-    monkeypatch.setattr(
-        "bull_call.scheduler.select_account_id", lambda _c: "A1",
-    )
-    monkeypatch.setattr(
-        "bull_call.scheduler.disconnect", lambda _c: None,
-    )
-
-    # No real sleep during recovery.
-    stop_event = sched._stop_event
-    monkeypatch.setattr(stop_event, "wait", lambda timeout=None: stop_event.is_set())
+    timeouts = _record_wait_timeouts(monkeypatch, sched)
+    caplog.set_level(logging.INFO, logger="bull_call.events")
 
     sched.run_forever()
 
     assert len(calls) == 2, "loop did not retry after transient exception"
+    # Backoff was invoked with the configured timeout at least once
+    # (between the failure and the success).
+    assert 300.0 in timeouts, (
+        f"expected wait(timeout=300.0) during recovery; got {timeouts}"
+    )
+    # And a session_error event was emitted with consecutive=1.
+    session_error_records = [
+        r for r in caplog.records
+        if r.name == "bull_call.events" and '"session_error"' in r.getMessage()
+    ]
+    assert len(session_error_records) == 1
+    assert '"consecutive": 1' in session_error_records[0].getMessage()
 
 
 def test_run_forever_circuit_breaker_opens_after_max_consecutive_errors(
-    store: Store, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    store: Store,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    stub_gateway: None,
 ) -> None:
     """N consecutive failures trip the circuit breaker; loop exits so ASG
-    can respawn with fresh state."""
+    can respawn with fresh state. Each failing session emits its own
+    session_error event with the matching consecutive counter."""
 
     settings = _settings(
         session_error_backoff_sec=300,
@@ -261,38 +285,44 @@ def test_run_forever_circuit_breaker_opens_after_max_consecutive_errors(
         [RuntimeError("boom 1"), RuntimeError("boom 2"), RuntimeError("boom 3"),
          RuntimeError("boom 4")],  # 4th would never run if circuit opens at 3
     )
-
-    monkeypatch.setattr(
-        "bull_call.scheduler.connect", lambda **kw: object(),
-    )
-    monkeypatch.setattr(
-        "bull_call.scheduler.select_account_id", lambda _c: "A1",
-    )
-    monkeypatch.setattr(
-        "bull_call.scheduler.disconnect", lambda _c: None,
-    )
-
-    stop_event = sched._stop_event
-    monkeypatch.setattr(stop_event, "wait", lambda timeout=None: stop_event.is_set())
-
+    _record_wait_timeouts(monkeypatch, sched)
     caplog.set_level(logging.INFO, logger="bull_call.events")
+
     sched.run_forever()
 
     assert len(calls) == 3, (
         f"circuit breaker should have stopped after 3 consecutive errors; "
         f"saw {len(calls)} calls"
     )
-    assert any(
-        '"circuit_breaker_open"' in r.getMessage()
-        for r in caplog.records
-    ), "expected a circuit_breaker_open event"
+
+    # One session_error per failing session, in order, with the right counter.
+    session_error_records = [
+        r for r in caplog.records
+        if r.name == "bull_call.events" and '"session_error"' in r.getMessage()
+    ]
+    assert len(session_error_records) == 3
+    for idx, record in enumerate(session_error_records, start=1):
+        assert f'"consecutive": {idx}' in record.getMessage()
+        assert '"max_consecutive": 3' in record.getMessage()
+
+    # Followed by exactly one circuit_breaker_open.
+    breaker_records = [
+        r for r in caplog.records
+        if r.name == "bull_call.events" and '"circuit_breaker_open"' in r.getMessage()
+    ]
+    assert len(breaker_records) == 1
 
 
 def test_run_forever_resets_consecutive_counter_on_success(
-    store: Store, monkeypatch: pytest.MonkeyPatch,
+    store: Store,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    stub_gateway: None,
 ) -> None:
     """A successful session should reset the consecutive-error counter,
-    so the circuit breaker only fires on UNINTERRUPTED runs of failures."""
+    so the circuit breaker only fires on UNINTERRUPTED runs of failures.
+    Asserts no ``circuit_breaker_open`` event leaks for this mixed
+    success/failure pattern."""
 
     settings = _settings(
         session_error_backoff_sec=300,
@@ -311,19 +341,8 @@ def test_run_forever_resets_consecutive_counter_on_success(
             None,                   # success again -> resets again
         ],
     )
-
-    monkeypatch.setattr(
-        "bull_call.scheduler.connect", lambda **kw: object(),
-    )
-    monkeypatch.setattr(
-        "bull_call.scheduler.select_account_id", lambda _c: "A1",
-    )
-    monkeypatch.setattr(
-        "bull_call.scheduler.disconnect", lambda _c: None,
-    )
-
-    stop_event = sched._stop_event
-    monkeypatch.setattr(stop_event, "wait", lambda timeout=None: stop_event.is_set())
+    _record_wait_timeouts(monkeypatch, sched)
+    caplog.set_level(logging.INFO, logger="bull_call.events")
 
     sched.run_forever()
 
@@ -331,23 +350,35 @@ def test_run_forever_resets_consecutive_counter_on_success(
         f"counter should reset on success; circuit didn't open prematurely. "
         f"got {len(calls)} calls"
     )
+    # Strict negative: no circuit-breaker event for this mixed pattern.
+    breaker_records = [
+        r for r in caplog.records
+        if r.name == "bull_call.events" and '"circuit_breaker_open"' in r.getMessage()
+    ]
+    assert breaker_records == [], (
+        "circuit breaker fired despite successful sessions resetting the counter"
+    )
 
 
-def test_run_forever_propagates_keyboard_interrupt(
-    store: Store, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    "raised",
+    [KeyboardInterrupt(), SystemExit(0)],
+    ids=["KeyboardInterrupt", "SystemExit"],
+)
+def test_run_forever_propagates_signal_exceptions(
+    store: Store,
+    raised: BaseException,
+    stub_gateway: None,
 ) -> None:
-    """KeyboardInterrupt / SystemExit MUST escape the recovery wrapper —
-    swallowing them would mean Ctrl+C / docker-stop signals are ignored."""
+    """KeyboardInterrupt and SystemExit MUST both escape the recovery
+    wrapper — swallowing them would mean Ctrl+C / docker-stop / forced
+    interpreter shutdown are silently ignored."""
 
     settings = _settings()
     sched, calls = _scheduler_with_session_results(
-        store, settings, [KeyboardInterrupt()],
+        store, settings, [raised],
     )
 
-    monkeypatch.setattr("bull_call.scheduler.connect", lambda **kw: object())
-    monkeypatch.setattr("bull_call.scheduler.select_account_id", lambda _c: "A1")
-    monkeypatch.setattr("bull_call.scheduler.disconnect", lambda _c: None)
-
-    with pytest.raises(KeyboardInterrupt):
+    with pytest.raises(type(raised)):
         sched.run_forever()
     assert len(calls) == 1

@@ -122,28 +122,47 @@ class Scheduler:
                     raise
                 except Exception as exc:
                     consecutive_errors += 1
-                    log.exception(
-                        "_run_one_session raised %s (consecutive=%d/%d)",
-                        type(exc).__name__, consecutive_errors, max_consecutive,
-                    )
-                    events.emit(
-                        "session_error",
-                        error_type=type(exc).__name__,
-                        message=str(exc),
-                        consecutive=consecutive_errors,
-                        max_consecutive=max_consecutive,
-                    )
-                    if consecutive_errors >= max_consecutive:
+                    # Both the log call and the events.emit call below are
+                    # *instrumentation*; if either of them raises (broken
+                    # logger, full disk, network glitch on the events
+                    # logger handler) we must NOT let that defeat the
+                    # crash-recovery counter / backoff / circuit breaker.
+                    # Wrap each side-effect in try/except.
+                    try:
+                        log.exception(
+                            "_run_one_session raised %s (consecutive=%d/%d)",
+                            type(exc).__name__,
+                            consecutive_errors, max_consecutive,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    try:
                         events.emit(
-                            "circuit_breaker_open",
-                            consecutive_errors=consecutive_errors,
-                            reason="session_error_max_consecutive_reached",
+                            "session_error",
+                            error_type=type(exc).__name__,
+                            message=str(exc),
+                            consecutive=consecutive_errors,
+                            max_consecutive=max_consecutive,
                         )
-                        log.error(
-                            "circuit breaker open after %d consecutive "
-                            "session errors; exiting so ASG can respawn",
-                            consecutive_errors,
-                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    if consecutive_errors >= max_consecutive:
+                        try:
+                            events.emit(
+                                "circuit_breaker_open",
+                                consecutive_errors=consecutive_errors,
+                                reason="session_error_max_consecutive_reached",
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                        try:
+                            log.error(
+                                "circuit breaker open after %d consecutive "
+                                "session errors; exiting so ASG can respawn",
+                                consecutive_errors,
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
                         return
                     self._stop_event.wait(timeout=backoff_s)
                 else:
