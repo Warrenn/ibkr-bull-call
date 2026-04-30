@@ -27,7 +27,7 @@ Track each item as `TODO`, `DOING`, `DONE`, `BLOCKED`, or `KILLED`.
 | --- | --- | --- | --- | --- |
 | Phase 0 repo audit | DONE | "Notes From Current Repo State" below + PRs #41 #42 | me | Every code-side §3 P0/P1 closed; the two strategy hypotheses (strikes / stop) are deferred to §5.A / §5.B ablation per CONTRIBUTING.md |
 | Data inventory | TODO | `docs/data-inventory.md` | me | Name data sources actually available now |
-| Strategy spec freeze | TODO | `docs/STRATEGY-SPEC-v1.md` | me | Freeze before touching holdout |
+| Strategy spec freeze | DONE | `docs/STRATEGY-SPEC-v1.md` | me | Frozen 2026-04-30 — sizing/overlays/pre-run checklist added; entry/exit window timestamps deferred to YAML pre-run pins |
 | Directional edge test | TODO | `artifacts/directional-edge-v1/` | me | Fastest falsification step |
 | Minimal post-cost control backtest | TODO | `artifacts/control-backtest-v1/` | me | Must be reproducible |
 | Trade-expression comparison | TODO | `artifacts/expression-comparison-v1/` | me | Spread vs long call vs ES/MES |
@@ -48,11 +48,16 @@ These are the items worth doing immediately.
   deferred to `live-capital-go-no-go.md` §5.A / §5.B ablation per
   CONTRIBUTING.md.**
 
-- [ ] Create `docs/STRATEGY-SPEC-v1.md`.
+- [x] Create `docs/STRATEGY-SPEC-v1.md`.
   Include: entry window, strike-selection logic, exits, overlays, sizing,
   slippage assumptions, commissions, holdout window, and the exact version of
   the rules being tested.
   Exit: there is one frozen spec that later evidence can reference.
+  **Status: DONE 2026-04-30 — spec is frozen in shape; entry/exit window
+  timestamps and holdout date pin are deferred to the per-spec YAMLs and
+  manifest under the new "Pre-Run Checklist" section. A run touching any
+  unpinned input must be marked `status: PRE_FREEZE` and excluded from
+  decision rules.**
 
 - [ ] Create `docs/data-inventory.md`.
   Include: what SPX, option-chain, ES, VIX, and calendar data you already
