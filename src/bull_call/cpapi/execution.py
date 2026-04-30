@@ -199,7 +199,10 @@ def submit_entry_lmt(
             client.cancel_order(order_id=order_id, account_id=account_id)
         except Exception as exc:
             log.warning("cancel failed for %s: %s", order_id, exc)
-    log.warning("entry LMT not filled within budget; cancelled")
+    if should_stop_fn():
+        log.info("entry LMT %s cancelled on shutdown request", order_id)
+    else:
+        log.warning("entry LMT not filled within budget; cancelled")
     return FillReport(filled=False, avg_fill_price=math.nan, order_id=order_id)
 
 
@@ -236,7 +239,14 @@ def submit_close_market(
     fill = _await_fill(client, order_id, timeout_s, should_stop_fn=should_stop_fn)
     if fill is not None:
         return FillReport(filled=True, avg_fill_price=fill, order_id=order_id)
-    log.error("close MKT did not fill within %ds; order left working", timeout_s)
+    if should_stop_fn():
+        log.info(
+            "close MKT %s left working at IBKR (graceful shutdown); "
+            "next instance will reconcile",
+            order_id,
+        )
+    else:
+        log.error("close MKT did not fill within %ds; order left working", timeout_s)
     return FillReport(filled=False, avg_fill_price=math.nan, order_id=order_id)
 
 

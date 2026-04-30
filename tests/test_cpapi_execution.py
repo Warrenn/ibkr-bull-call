@@ -351,3 +351,59 @@ def test_verify_legs_balanced_short_circuits_on_should_stop(
     assert balanced is False
     assert elapsed < 1.0
     assert polls[0] >= 2
+
+
+def test_submit_close_market_shutdown_logs_info_not_error(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When the close path bails on shutdown, it should log INFO ("left
+    working at IBKR; next instance will reconcile"), NOT the ERROR
+    "did not fill within Xs" — that error is reserved for genuine timeouts.
+    """
+
+    import logging
+
+    from bull_call.chain import OptionContract
+    from bull_call.cpapi import execution
+
+    long_leg = OptionContract(strike=4995.0, conid=111, right="C", expiry="20260429")
+    short_leg = OptionContract(strike=5005.0, conid=222, right="C", expiry="20260429")
+
+    class _Resp:
+        def __init__(self, data: Any) -> None:
+            self.data = data
+
+    class FakeClient:
+        def place_order(self, *, order_request: Any, answers: Any, account_id: str) -> _Resp:
+            return _Resp([{"order_id": "close-1"}])
+
+        def order_status(self, *, order_id: str) -> _Resp:
+            return _Resp({"order_status": "Submitted"})
+
+    monkeypatch.setattr(execution.time, "sleep", lambda _s: None)
+    caplog.set_level(logging.DEBUG, logger="bull_call.cpapi.execution")
+
+    fill = execution.submit_close_market(
+        FakeClient(),  # type: ignore[arg-type]
+        account_id="A1",
+        long_leg=long_leg,
+        short_leg=short_leg,
+        timeout_s=300.0,
+        should_stop_fn=lambda: True,
+    )
+
+    assert fill.filled is False
+    error_records = [
+        r for r in caplog.records
+        if r.levelno >= logging.ERROR and "did not fill within" in r.getMessage()
+    ]
+    assert error_records == [], (
+        "submit_close_market logged a misleading 'did not fill within' "
+        "ERROR even though shutdown was the cause; expected an INFO message."
+    )
+    info_records = [
+        r for r in caplog.records
+        if "graceful shutdown" in r.getMessage()
+    ]
+    assert info_records, "expected an INFO log mentioning graceful shutdown"

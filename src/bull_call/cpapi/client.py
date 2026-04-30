@@ -14,6 +14,8 @@ from dataclasses import dataclass
 
 from ibind import IbkrClient
 
+from bull_call.cpapi import ShutdownRequested
+
 log = logging.getLogger(__name__)
 
 
@@ -43,7 +45,9 @@ def connect(
     last_err: Exception | None = None
     while time.monotonic() < deadline:
         if should_stop_fn():
-            raise RuntimeError("shutdown requested before gateway became ready")
+            raise ShutdownRequested(
+                "shutdown requested before gateway became ready"
+            )
         try:
             status = client.check_auth_status()
             if status.data.get("authenticated") and status.data.get("connected"):

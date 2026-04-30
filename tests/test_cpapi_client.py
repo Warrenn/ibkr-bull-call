@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from bull_call.cpapi import ShutdownRequested
 from bull_call.cpapi import client as cpapi_client
 
 
@@ -51,7 +52,7 @@ def test_connect_returns_when_should_stop_set_immediately(
     monkeypatch.setattr(cpapi_client.time, "sleep", lambda _s: None)
 
     wall_before = time.monotonic()
-    with pytest.raises(RuntimeError, match="shutdown requested"):
+    with pytest.raises(ShutdownRequested, match="shutdown requested"):
         cpapi_client.connect(
             ready_timeout_s=300.0,
             should_stop_fn=lambda: True,
@@ -101,9 +102,20 @@ def test_connect_short_circuits_after_some_polling(
             flag["stop"] = True
         return flag["stop"]
 
-    with pytest.raises(RuntimeError, match="shutdown requested"):
+    with pytest.raises(ShutdownRequested, match="shutdown requested"):
         cpapi_client.connect(
             ready_timeout_s=300.0,
             should_stop_fn=stop_fn,
         )
     assert polls[0] >= 3
+
+
+def test_shutdown_requested_is_a_runtimeerror() -> None:
+    """``ShutdownRequested`` must subclass ``RuntimeError`` so any
+    pre-existing ``except RuntimeError`` handler still catches it (existing
+    callers shouldn't break), while new code can match the specific type."""
+
+    assert issubclass(ShutdownRequested, RuntimeError)
+    err = ShutdownRequested("test")
+    assert isinstance(err, RuntimeError)
+    assert isinstance(err, ShutdownRequested)
