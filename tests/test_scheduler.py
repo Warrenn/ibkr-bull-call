@@ -578,6 +578,114 @@ def test_reconcile_skips_already_opened_today(
     assert rec.adopted_from_ibkr is False  # original record, NOT adopted
 
 
+# ---------- _record_settlements --------------------------------------------
+
+
+class _SchedRespStub:
+    """Minimal ``Result``-shaped object: just exposes ``.data``."""
+
+    def __init__(self, data: Any) -> None:
+        self.data = data
+
+
+class _UnderlyingLookupClient:
+    """Fake IbkrClient that satisfies the one method ``_record_settlements``
+    needs (``search_contract_by_symbol``). Extracted so each settlement test
+    doesn't redefine the same class. Returns a fixed conid for any symbol —
+    tests that care about per-symbol routing can subclass."""
+
+    UNDERLYING_CONID = 416904
+
+    def search_contract_by_symbol(
+        self, *, symbol: str, sec_type: str,
+    ) -> _SchedRespStub:
+        return _SchedRespStub([{"conid": self.UNDERLYING_CONID}])
+
+
+def test_record_settlements_no_op_when_no_open_spreads(
+    store: Store, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No open rows in DDB → no API calls, no DDB writes, no logs."""
+
+    sched = Scheduler(_settings(), store)
+    sched._client = object()  # type: ignore[assignment]  # asserted non-None
+    caplog.set_level(logging.DEBUG, logger="bull_call.scheduler")
+    caplog.set_level(logging.DEBUG, logger="bull_call.events")
+
+    # Snapshot store state before (empty by construction).
+    before = store.load_open_spreads_for_today("2026-04-29")
+    assert before == []
+
+    sched._record_settlements(dt.date(2026, 4, 29))
+
+    # No state changes: still empty.
+    assert store.load_open_spreads_for_today("2026-04-29") == []
+    # And no scheduler / events log records emitted at all.
+    assert [r for r in caplog.records if r.name in (
+        "bull_call.scheduler", "bull_call.events",
+    )] == []
+
+
+def test_record_settlements_records_settle_for_open_spread(
+    store: Store, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Open spread + valid settle spot → DDB row updated to SETTLED with
+    pnl and settle_value populated."""
+
+    sched = Scheduler(_settings(), store)
+    sched._client = _UnderlyingLookupClient()  # type: ignore[assignment]
+
+    store.record_open(
+        date="2026-04-29", symbol="SPX",
+        long_strike=4995.0, short_strike=5005.0, debit=5.50,
+        opened_at="2026-04-29T14:30:00+00:00",
+    )
+
+    monkeypatch.setattr(
+        "bull_call.scheduler.fetch_spot",
+        lambda _client, *, conid: 5008.21,
+    )
+
+    sched._record_settlements(dt.date(2026, 4, 29))
+
+    rec = store.get_spread("2026-04-29#SPX")
+    assert rec.status == "SETTLED"
+    assert rec.exit_kind == "SETTLE"
+    assert rec.settle_value == pytest.approx(5008.21)
+    # P&L per 1 contract: payoff = max(0, 5008.21-4995) - max(0, 5008.21-5005) - 5.50
+    # = 13.21 - 3.21 - 5.50 = 4.50, *100 = $450.00
+    assert rec.pnl == pytest.approx(450.0)
+
+
+def test_record_settlements_skips_when_spot_unavailable(
+    store: Store, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """fetch_spot returns None — leave the row OPEN (operator can rerun
+    or manual-settle later) and log loudly so it's visible in CW."""
+
+    sched = Scheduler(_settings(), store)
+    sched._client = _UnderlyingLookupClient()  # type: ignore[assignment]
+
+    store.record_open(
+        date="2026-04-29", symbol="SPX",
+        long_strike=4995.0, short_strike=5005.0, debit=5.50,
+        opened_at="2026-04-29T14:30:00+00:00",
+    )
+    monkeypatch.setattr(
+        "bull_call.scheduler.fetch_spot",
+        lambda _client, *, conid: None,
+    )
+    caplog.set_level(logging.ERROR, logger="bull_call.scheduler")
+
+    sched._record_settlements(dt.date(2026, 4, 29))
+
+    # Row stays OPEN — was NOT marked SETTLED.
+    rec = store.get_spread("2026-04-29#SPX")
+    assert rec.status == "OPEN"
+    assert any("cannot fetch settle spot" in r.getMessage() for r in caplog.records)
+
+
 @pytest.mark.parametrize(
     "raised",
     [KeyboardInterrupt(), SystemExit(0)],
