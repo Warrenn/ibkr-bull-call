@@ -139,7 +139,7 @@ CI gate: 85% coverage (existing project standard) + mypy + shellcheck on infra c
 
 ## Progress
 
-- [ ] Phase 1: signal + shadow (5 steps)
+- [x] Phase 1: signal + shadow (5 steps) — completed 2026-04-30 (PR pending)
 - [ ] Phase 2: state + rebalance plan (4 steps)
 - [ ] Phase 3: IBKR integration + dry-run + paper smoke (4 steps)
 - [ ] Phase 4: scheduling + monitoring + halt (5 steps)
