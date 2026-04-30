@@ -19,9 +19,12 @@ buy decision belongs in a separate `docs/data-acquisition-decision.md`.
 
 ## Status Verdict
 
-- **Phase 1 (directional-edge test)**: BLOCKED on data acquisition.
-  Need either `spx_spot_intraday` or `es_or_mes_intraday` at 1-minute
-  resolution. Trading calendar is in place; nothing else is.
+- **Phase 1 (directional-edge test)**: PARTIALLY UNBLOCKED.
+  `es_or_mes_intraday` is now populated (ES front-month continuous,
+  GLBX.MDP3 OHLCV-1m via Databento, 2023-04-30 → 2026-04-30, 1.05M
+  rows, $3.85). `spx_spot_intraday` is still TBD (planned via IBKR
+  Historical at no incremental cost). Trading calendar in place. The
+  test can run on ES alone for the directional-edge falsification.
 - **Phase 2 (expression comparison)**: BLOCKED on data acquisition.
   Needs everything Phase 1 needs plus `spx_0dte_call_chain` with
   bid/ask snapshots covering entry and exit windows.
@@ -61,6 +64,27 @@ Manifest version `1`, dataset version `dataset-v1`.
 | Reproducibility | byte-identical re-runs verified via `tests/research/test_generate_trading_calendar.py::test_generate_is_deterministic` |
 | Known limitations | event tags (FOMC / CPI / NFP / OPEX) not yet attached — defer to Tier 2; half-day detection compares NYSE close to 16:00 ET |
 
+#### `es_or_mes_intraday`
+
+| Field | Value |
+| --- | --- |
+| Status | populated |
+| Source | GLBX.MDP3 OHLCV-1m via Databento |
+| Vendor | Databento |
+| License | Databento Standard self-serve (single-seat, research, no redistribution) |
+| Acquired | 2026-04-30 |
+| Path | `research/data/dataset-v1/es_intraday.parquet` |
+| Generator | `research/scripts/download_databento.py` |
+| Symbol | ES.c.0 (continuous front-month, calendar-roll) |
+| stype_in | continuous |
+| Resolution | 1-minute OHLCV |
+| Date range | 2023-04-30 → 2026-04-30 (36 months) |
+| Rows | 1,053,199 |
+| Cost | $3.85 (covered by Databento free credit) |
+| Schema | `ts_event`, `rtype`, `publisher_id`, `instrument_id`, `open`, `high`, `low`, `close`, `volume`, `symbol` |
+| Checksum | `sha256:cf4567cd3303f7f45f70baa9d862715913c23852fb7ece220234c4d694cfc869` |
+| Known limitations | Databento flagged 3+ days as "degraded": 2025-09-17, 2025-09-24, 2025-11-28 (warning truncated; query `metadata.get_dataset_condition` for full list). Calendar continuous (`c` rank 0) introduces small price-level gaps at roll boundaries. OHLCV-1m is bar-of-trades, not bar-of-quotes — for mid-price use, reconstruct from MBP-1 / CMBP-1 instead. |
+
 ### Required But Not Acquired
 
 #### `spx_spot_intraday`
@@ -76,24 +100,6 @@ Manifest version `1`, dataset version `dataset-v1`.
 | Tier 1 history | 24 months minimum, 36 months preferred |
 | Schema (planned) | `ts_utc`, `symbol`, `price` (optional `bid`, `ask`) |
 | Known limitations (anticipated) | 1-minute spot alone cannot validate fine-grained stop / PT behavior |
-
-#### `es_or_mes_intraday`
-
-| Field | Value |
-| --- | --- |
-| Status | TBD |
-| Required by | Phase 1 (directional-edge proxy), Phase 2 (E3 expression candidate) |
-| Path (planned) | `research/data/dataset-v1/es_intraday.parquet` |
-| Symbol | ES or MES |
-| Tier 1 resolution | 1-minute |
-| Tier 2 resolution | 1-second or tick |
-| Schema (planned) | `ts_utc`, `symbol`, `price` |
-
-Notes:
-
-- ES (E-mini S&P 500) and MES (Micro E-mini) have different multipliers
-  but identical price series; either satisfies the directional-edge
-  question. Pick whichever vendor sells more cheaply.
 
 #### `spx_0dte_call_chain`
 
@@ -194,11 +200,11 @@ result that wants to count as evidence.
 
 Sorted by which phase it unblocks (sooner = higher priority).
 
-1. **`spx_spot_intraday` OR `es_or_mes_intraday`** — Tier 1, blocks
-   Phase 1. Either satisfies the directional-edge test (the test is
-   "does the underlying view have edge?", not "does SPX specifically
-   have edge?"). Pick whichever vendor sells the cheaper acceptable
-   coverage.
+1. ~~**`spx_spot_intraday` OR `es_or_mes_intraday`** — Tier 1, blocks
+   Phase 1.~~ **DONE 2026-04-30** — `es_or_mes_intraday` populated
+   via Databento. `spx_spot_intraday` is the secondary path (IBKR,
+   no incremental cost) and unblocks SPX-specific directional
+   testing; ES alone is sufficient for the falsification step.
 2. **`spx_0dte_call_chain`** — Tier 1, blocks Phase 2. Snapshot
    coverage of entry-window + exit-window is enough; full-session
    chain is Tier 2.
@@ -221,10 +227,10 @@ Per the tracker NOW item:
 > Exit: we know whether fast validation is blocked by missing data or
 > just by missing code.
 
-**Answer**: blocked by missing data. The trading calendar is in place
-and reproducible; everything else is a vendor decision away. The
-harness contract from
-[`live-capital-go-no-go.md`](./live-capital-go-no-go.md) §1.5.2 can be
-implemented today, but no run against it counts as v1 evidence until
-at least `spx_spot_intraday` (or the ES/MES proxy) is pinned in the
-manifest.
+**Answer (updated 2026-04-30)**: Phase 1 (directional-edge) is now
+unblocked — `es_or_mes_intraday` is pinned in the manifest. Phase 2
+(expression comparison) remains blocked on `spx_0dte_call_chain` (a
+Databento PAYG decision per the data-acquisition-decision doc;
+deferred until Phase 1 says EDGE PRESENT). The harness contract from
+[`live-capital-go-no-go.md`](./live-capital-go-no-go.md) §1.5.2 can
+now be implemented and run on real data.
