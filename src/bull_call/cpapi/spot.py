@@ -74,29 +74,32 @@ def stream_ticks(
 
     last_yield: dt.datetime | None = None
     while True:
-        if dt.datetime.now(dt.timezone.utc) >= close_utc:
-            return
         try:
             raw = accessor.get(block=True, timeout=poll_timeout_s)
+            spot: float | None = _spot_from_message(raw)
         except queue.Empty:
-            # No message this poll. Sample ``now`` AFTER the block so the
-            # silence accounting reflects actual wall-clock elapsed time —
-            # capturing it pre-block undercounts by up to ``poll_timeout_s``.
-            now = dt.datetime.now(dt.timezone.utc)
-            if last_yield is None or (now - last_yield).total_seconds() >= silence_emit_interval_s:
-                last_yield = now
-                yield None, now
-            continue
-        spot = _spot_from_message(raw)
+            spot = None
+
+        # Single post-block ``now`` — reused for the close-utc check, the
+        # silence-interval check, and the yielded timestamp. Sampling pre-block
+        # would undercount silence by up to ``poll_timeout_s`` (the time spent
+        # blocked); using one consistent timestamp per iteration also keeps
+        # the blind-window accounting in monitor_stop coherent.
+        now = dt.datetime.now(dt.timezone.utc)
+        if now >= close_utc:
+            return
+
         if spot is None:
-            # Junk/heartbeat — same post-block sampling rule as above.
-            now = dt.datetime.now(dt.timezone.utc)
+            # Empty queue or unusable message (heartbeat/junk). Emit a silence
+            # sentinel only if enough wall-clock has passed since the last
+            # yield, so monitor_stop can drive R23a outage detection.
             if last_yield is None or (now - last_yield).total_seconds() >= silence_emit_interval_s:
                 last_yield = now
                 yield None, now
             continue
-        last_yield = dt.datetime.now(dt.timezone.utc)
-        yield spot, last_yield
+
+        last_yield = now
+        yield spot, now
 
 
 def _spot_from_message(message: object) -> float | None:
