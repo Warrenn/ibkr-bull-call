@@ -1,0 +1,58 @@
+# pre-commit hooks: run the same checks CI runs, but locally before push.
+# Optional — install with ``uv pip install pre-commit && pre-commit install``.
+# CI is the authoritative check; pre-commit just makes the feedback loop
+# tight when iterating.
+#
+# To skip a check for a single commit (rare, e.g. a WIP commit):
+#   SKIP=mypy git commit -m "wip"
+# To run all hooks on all files (e.g. after enabling for the first time):
+#   pre-commit run --all-files
+
+repos:
+  # Quick sanity: trailing whitespace, EOF newline, large files.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        # CFN templates use !Sub / !Ref / !GetAtt tags that vanilla
+        # PyYAML doesn't understand. Skip these — cfn-lint handles them.
+        exclude: ^infra/cloudformation/.*\.yaml$
+      - id: check-toml
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+
+  # Shell linting (matches the CI shellcheck job).
+  - repo: https://github.com/koalaman/shellcheck-precommit
+    rev: v0.10.0
+    hooks:
+      - id: shellcheck
+        files: ^infra/scripts/.*\.sh$
+
+  # Local hooks invoked through uv so deps come from the project's lock.
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest (full suite)
+        entry: uv run pytest -q
+        language: system
+        types: [python]
+        pass_filenames: false
+        # Only run on push, not every commit — pytest takes ~7s and
+        # would slow down rapid commits.
+        stages: [pre-push]
+
+      - id: mypy
+        name: mypy (src)
+        entry: uv run mypy src
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: cfn-lint
+        name: cfn-lint (CloudFormation templates)
+        entry: cfn-lint
+        language: system
+        files: ^infra/cloudformation/.*\.yaml$
