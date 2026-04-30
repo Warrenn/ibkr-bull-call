@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import cast
 
 import pandas as pd
 import pandas_market_calendars as mcal
@@ -36,7 +37,9 @@ def _schedule_for(date: dt.date) -> pd.Series | None:
     sched = _calendar().schedule(start_date=date, end_date=date)
     if sched.empty:
         return None
-    return sched.iloc[0]
+    # pandas-stubs types DataFrame.iloc[0] as Any; cast to Series to satisfy
+    # mypy strict mode without losing the runtime type guarantee.
+    return cast("pd.Series", sched.iloc[0])
 
 
 def is_trading_day(date: dt.date) -> bool:

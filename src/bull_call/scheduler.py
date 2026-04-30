@@ -264,14 +264,42 @@ class Scheduler:
 
         self._monitor_open_spreads(today_et, close_utc)
 
-        self._sleep_until(close_utc + dt.timedelta(minutes=1))
+        # Gate settlement on the post-close sleep completing. A SIGTERM
+        # mid-session that interrupts this sleep MUST NOT cause settlement
+        # to fire — that would mark the local row SETTLED while the IBKR
+        # position is still open, stranding the position because
+        # ``load_open_spreads_for_today`` filters on status=OPEN. The next
+        # instance's reconcile-on-startup queries IBKR directly and adopts
+        # the (still OPEN) DDB row, so leaving it alone is the safe default.
+        if not self._sleep_until(close_utc + dt.timedelta(minutes=1)):
+            log.info(
+                "shutdown before settlement; leaving any OPEN rows for "
+                "next instance to adopt via reconcile",
+            )
+            return
         self._record_settlements(today_et)
 
     def _next_entry_time(self, now_utc: dt.datetime) -> dt.datetime:
         today_et = now_utc.astimezone(_ET).date()
         candidate = self._entry_time_for(today_et)
-        if candidate is not None and candidate > now_utc and is_trading_day(today_et):
-            return candidate
+        today_sessions = session_times(today_et)
+        if (
+            candidate is not None
+            and is_trading_day(today_et)
+            and today_sessions is not None
+        ):
+            # Pre-entry today: sleep until today's entry time (normal path).
+            if candidate > now_utc:
+                return candidate
+            # Mid-session restart: now is past today's entry but before today's
+            # close. Return today's entry time (in the past) so the caller's
+            # ``_sleep_until`` short-circuits and the session resumes
+            # reconcile + monitor + settlement instead of skipping today.
+            # Without this branch an instance replacement at 11:00 ET silently
+            # forfeits the day — contradicting the self-healing infra story.
+            if now_utc < today_sessions.close_utc:
+                return candidate
+        # Past today's session (or non-trading day): roll forward.
         next_open = next_session_open_utc(now_utc)
         next_day_et = next_open.astimezone(_ET).date()
         nxt = self._entry_time_for(next_day_et)
@@ -526,6 +554,27 @@ class Scheduler:
             spot = fetch_spot(self._client, conid=under_conid)
             if spot is None:
                 log.error("cannot fetch settle spot for %s", rec.symbol)
+                continue
+            # Sanity range: a settle spot wildly outside the strike band
+            # indicates a stale or corrupted quote (off-hours cached value,
+            # wrong symbol, feed glitch). Refuse to write garbage; operator
+            # can manually settle later. The 50%–200% band catches obvious
+            # corruption while admitting real one-day moves up to ±50% —
+            # well past anything historical SPX has produced intraday.
+            #
+            # KNOWN APPROXIMATION: this uses post-close ``fetch_spot`` as a
+            # proxy for the official CBOE SPX SET print. Tracked as a
+            # Phase 1 data-validation deliverable in
+            # docs/live-capital-go-no-go.md — replace with the official SET
+            # before live capital.
+            sanity_low = rec.long_strike * 0.5
+            sanity_high = rec.long_strike * 2.0
+            if not (sanity_low <= spot <= sanity_high):
+                log.error(
+                    "rejecting settle spot=%.2f for %s: outside sanity band "
+                    "[%.2f, %.2f] around long_strike=%.2f. Row left OPEN.",
+                    spot, rec.symbol, sanity_low, sanity_high, rec.long_strike,
+                )
                 continue
             pnl = settlement_pnl(
                 entry_debit=rec.debit,

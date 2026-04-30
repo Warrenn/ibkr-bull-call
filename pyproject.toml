@@ -19,6 +19,8 @@ dev = [
     "freezegun>=1.5",
     "mypy>=1.10",
     "types-pytz",
+    "pandas-stubs>=2.0",  # quiet missing-stub warnings on calendar.py imports
+    "scipy-stubs>=1.13",  # quiet missing-stub warnings on pricing.py imports
     "boto3>=1.43.0",
     "botocore>=1.34",
     "moto[dynamodb]>=5.0",

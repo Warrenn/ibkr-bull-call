@@ -370,3 +370,97 @@ def test_load_settings_via_ssm_end_to_end(ssm_client: object) -> None:
     # Static, not in SSM:
     assert settings.ib_host == "ibgateway"
     assert settings.ib_port == 4002
+
+
+def _stub_settings(client: object, json_body: str) -> Stubber:
+    stubber = Stubber(client)  # type: ignore[arg-type]
+    stubber.add_response(
+        "get_parameter",
+        {"Parameter": {"Name": "/dev/ibkr-bull-call/settings", "Type": "String", "Value": json_body}},
+        {"Name": "/dev/ibkr-bull-call/settings", "WithDecryption": False},
+    )
+    return stubber
+
+
+def test_load_settings_via_ssm_uses_state_table_from_env_when_absent_from_ssm(
+    ssm_client: object, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """STATE_TABLE comes from infra (CFN-written bot.env) and is NOT a strategy
+    parameter — SSM JSON never sets it. The deployed loader must fall through
+    to the process env so the right DDB table is used in production."""
+
+    monkeypatch.setenv("STATE_TABLE", "bull-call-live-state")
+    monkeypatch.setenv("MAX_LOSS_USD", "999")  # would-be override; SSM should win
+    settings_value = json.dumps({
+        "maxLossUsd": 250,
+        "popThreshold": 0.55,
+    })
+
+    with _stub_settings(ssm_client, settings_value):
+        settings = load_settings_via_ssm(
+            prefix="/dev/ibkr-bull-call", client=ssm_client,
+        )
+
+    assert settings.state_table == "bull-call-live-state"
+
+
+def test_load_settings_via_ssm_ssm_wins_on_collision_with_env(
+    ssm_client: object, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """For keys present in BOTH env and SSM, SSM wins in deployed mode. SSM
+    is the canonical place to express deployed strategy parameters; env only
+    fills gaps for infra-set keys."""
+
+    monkeypatch.setenv("MAX_LOSS_USD", "100")
+    monkeypatch.setenv("POP_THRESHOLD", "0.30")
+    settings_value = json.dumps({
+        "maxLossUsd": 250,
+        "popThreshold": 0.55,
+    })
+
+    with _stub_settings(ssm_client, settings_value):
+        settings = load_settings_via_ssm(
+            prefix="/dev/ibkr-bull-call", client=ssm_client,
+        )
+
+    assert settings.max_loss_usd == 250.0
+    assert settings.pop_threshold == 0.55
+
+
+def test_load_settings_via_ssm_env_only_keys_pass_through(
+    ssm_client: object, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keys in env but not in SSM (e.g. STATE_TABLE, AWS_REGION, IB_HOST
+    overrides) flow through unchanged."""
+
+    monkeypatch.setenv("STATE_TABLE", "bull-call-live-state")
+    monkeypatch.setenv("IB_HOST", "127.0.0.1")
+    monkeypatch.setenv("IB_PORT", "5000")
+    settings_value = json.dumps({"maxLossUsd": 250})
+
+    with _stub_settings(ssm_client, settings_value):
+        settings = load_settings_via_ssm(
+            prefix="/dev/ibkr-bull-call", client=ssm_client,
+        )
+
+    assert settings.state_table == "bull-call-live-state"
+    assert settings.ib_host == "127.0.0.1"
+    assert settings.ib_port == 5000
+
+
+def test_load_settings_via_ssm_falls_back_to_dataclass_defaults_when_unset(
+    ssm_client: object, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If neither env nor SSM sets STATE_TABLE, the dataclass default
+    (``bull-call-dev-state``) wins — the historical behaviour is preserved
+    for local-test runs that hit no env or SSM at all."""
+
+    monkeypatch.delenv("STATE_TABLE", raising=False)
+    settings_value = json.dumps({"maxLossUsd": 250})
+
+    with _stub_settings(ssm_client, settings_value):
+        settings = load_settings_via_ssm(
+            prefix="/dev/ibkr-bull-call", client=ssm_client,
+        )
+
+    assert settings.state_table == "bull-call-dev-state"

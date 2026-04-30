@@ -11,9 +11,14 @@ RestartSec=15
 TimeoutStartSec=300
 EnvironmentFile=/etc/bull-call/ibeam.env
 
-# Pull the IBeam image and our PYTHONPATH for the SSM provider module
+# Pull the IBeam image and our PYTHONPATH for the SSM provider module.
+# IMAGE PINNING: voyz/ibeam:0.5.12 + manifest sha256 digest. The tag drives
+# readability; the digest defeats tag-overwrite supply-chain attacks. To
+# ratchet, fetch the latest release from
+# https://github.com/Voyz/ibeam/releases and pull its manifest digest from
+# https://hub.docker.com/v2/repositories/voyz/ibeam/tags/<tag>/.
 ExecStartPre=-/usr/bin/docker rm -f ibeam
-ExecStartPre=/usr/bin/docker pull voyz/ibeam:latest
+ExecStartPre=/usr/bin/docker pull voyz/ibeam:0.5.12@sha256:7ca5cf13ec8f0fc16aa8f10fd2613bff9add111a431581eb7818ea0ceeb7cd31
 
 # Mount /opt/bull-call/src so IBeam can import bull_call.ibeam_ssm_provider.
 # Pass through SSM_PREFIX + AWS_REGION (NOT credentials).
@@ -26,7 +31,7 @@ ExecStart=/usr/bin/docker run --rm --name ibeam \
     -e IBEAM_SECRETS_SOURCE \
     -e PYTHONPATH=/opt/bull-call/src \
     -v /opt/bull-call/src:/opt/bull-call/src:ro \
-    voyz/ibeam:latest
+    voyz/ibeam:0.5.12@sha256:7ca5cf13ec8f0fc16aa8f10fd2613bff9add111a431581eb7818ea0ceeb7cd31
 
 ExecStop=/usr/bin/docker stop ibeam
 

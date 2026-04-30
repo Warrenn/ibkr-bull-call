@@ -385,14 +385,80 @@ Test the marginal impact of:
 - event filters
 - confirmation filters
 - liquidity filters
-- strike-selection objective
-- stop logic
+- **strike-selection objective** — see §5.A below
+- **stop logic** — see §5.B below
 - time stop
 - profit-taking
 - hard close rules
 
 Rules that do not improve out-of-sample expectancy, drawdown, or robustness
 under stress should be removed.
+
+#### 5.A Strike-selection objective ablation (mandatory)
+
+The current production code in `src/bull_call/strikes.py` implements the
+"widest passing short strike" objective that `strategy-review.md` §2.1 / §3.5
+flags as **structurally adverse** — holding the long fixed and walking the
+short out trades probability for nominal max-profit. This is a starting
+hypothesis only. Before live capital, the ablation must compare it
+head-to-head against the redesign objectives from `strategy-review.md` §4.6 /
+§7 R16-R17:
+
+| Variant | What it picks | Source |
+|---|---|---|
+| `max_width_passing` (current) | Widest short under POP + dollar caps. | strikes.py:60-96 |
+| `closest_to_target_ratio` (redesign default) | (long, short) tuple whose `debit / width` is closest to the configured band midpoint. | strategy-review.md §7 R17 |
+| `max_entry_rr` | Tuple maximising `(width − debit) / debit` (true entry max-profit / max-loss). | strategy-review.md §7 R17 |
+| `max_pop_at_breakeven` | Tuple maximising BS `N(d2)` at the spread's breakeven. | strategy-review.md §7 R17 |
+| `max_exit_efficiency` | Tuple with the highest `executable_credit_estimate / debit` ratio (a *liquidity / exitability* proxy — explicitly NOT an entry payoff measure). | strategy-review.md §7 R17 |
+
+The ablation must additionally vary the **long candidate set**: a single
+closest-to-target-delta long (today's behaviour, where the "long" is fixed
+before the short search) vs. a target-delta band of 3–5 longs scored as a
+full `(long_candidate × candidate_widths)` tuple set (`strategy-review.md` §7
+R16). Locking the long before scoring bakes in an arbitrary entry constraint.
+
+**Pass criterion**: an objective wins only if it beats `max_width_passing`
+on **risk-adjusted, post-cost expectancy AND drawdown** on the holdout
+under the frozen spec, AND survives the per-path 2× / 3× slippage stress
+from §6.2. If no objective beats the control on the holdout, keep the
+simplest one and treat the redesign as not-validated.
+
+#### 5.B Stop logic ablation (mandatory)
+
+The current production code in `src/bull_call/stop.py` implements a
+spot-based one-cross stop: arms the first time spot ≥ breakeven, fires on
+the first tick where spot < breakeven. `strategy-review.md` §2.4 / §3.9
+flags two structural problems: (a) **spot is the wrong reference** — the
+spread's mark / executable credit is what the bot would realise on close;
+(b) **single-cross trigger creates whipsaw** — a one-tick print under
+breakeven and immediately back is enough to fire. The redesign in §4.8
+proposes a mark-based hard stop with confirmation. Before live capital,
+the ablation must compare:
+
+| Variant | Trigger | Source |
+|---|---|---|
+| `no_stop` (control) | Hold to settlement; never close early. Mandatory baseline per `strategy-review.md` §6.4. | n/a |
+| `spot_cross` (current) | Spot < breakeven, single-tick. | stop.py:55 |
+| `spot_cross_with_buffer` | Spot < breakeven − buffer, single-tick (where buffer is a small fraction of width). | strategy-review.md §3.9 |
+| `mark_based_hard_stop` (redesign default) | `executable_credit` ≤ `entry_debit × stop_pct_of_debit` continuously for `stop_confirm_sec`. | strategy-review.md §4.8 / §7 R25 |
+| `mark_based_with_time_stop` | `mark_based_hard_stop` PLUS at `time_stop_et`, close if `executable_credit < entry_debit × time_stop_pct_of_debit`. | strategy-review.md §7 R26 |
+
+Each variant must be evaluated **with and without** profit-taking
+(`pt_enabled` true / false per §7 R24) — stops and PT interact and cannot
+be ablated in isolation.
+
+**Pass criterion**: a stop variant wins only if it beats `no_stop` on the
+holdout on **expectancy AND drawdown AND max single-trade loss** — a stop
+that improves drawdown but worsens expectancy must show that the
+drawdown reduction is materially valuable (§6.6 invalidation criteria).
+If `no_stop` is competitive, ship the simpler design.
+
+**Implementation note for both ablations**: the harness from §1.5.2 must
+expose the strike-selection objective AND the stop variant as first-class
+config knobs that the ablation runner can toggle. Without that, ablation
+results are not reproducible and the spec-freeze rule (§1.5.4) cannot be
+enforced.
 
 ### Phase 6: Stress everything
 
