@@ -50,8 +50,16 @@ Resources:
   # Pay-per-request billing: ~150 writes/month + ~200 reads/month, well within
   # the always-free tier (25 GB / 25 RCU / 25 WCU). Storage of the table
   # itself is also <1 GB long-term, so realistic monthly cost is $0.
+  #
+  # Retain on stack delete + retain on logical-id replace: this table holds
+  # the canonical record of every spread we've ever opened, including stop
+  # journal events. A `cfn delete-stack` (intentional or accidental) must
+  # NOT take this with it. To actually delete the table the operator runs
+  # `aws dynamodb delete-table` explicitly after the stack is gone.
   StateTable:
     Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       TableName: !Sub bull-call-${Env}-state
       BillingMode: PAY_PER_REQUEST
@@ -78,8 +86,15 @@ Resources:
   # S3 bucket holding release artifacts (tarballs of the bot at a tagged
   # version). Bucket name is `bull-call-{env}-artifacts-{account}` so it's
   # globally unique without collisions across accounts.
+  #
+  # Retain on stack delete: keeps the release history (every tagged tarball
+  # we've ever shipped) even if the compute/data stacks are torn down for
+  # an environment rebuild. Operator can `aws s3 rb --force` explicitly if
+  # they actually want to delete the artifacts.
   ArtifactsBucket:
     Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       BucketName: !Sub bull-call-${Env}-artifacts-${AWS::AccountId}
       PublicAccessBlockConfiguration:
