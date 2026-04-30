@@ -1,0 +1,127 @@
+spec_id: strategy-spec-v9-sector-momentum
+strategy_spec_id: v9
+phase: phase_1_initial_test
+status: frozen_for_initial_test
+parent_spec: strategy-spec-v7 (KILLED-BY-DIAGNOSTIC PR #69)
+parent_result: STRATEGY_SPEC_AMBIGUITY
+
+question: >
+  Does cross-sectional momentum on Select Sector SPDR ETFs produce
+  positive risk-adjusted return over a 7-10 year window, with
+  statistical significance and acceptable drawdown profile?
+
+theoretical_basis: >
+  Cross-sectional momentum (Jegadeesh & Titman 1993) is the
+  most-replicated factor in finance. Hundreds of follow-up papers
+  document it across asset classes, time periods, and regions.
+  Empirical Sharpe historically 0.6-1.0 for sector momentum.
+
+dataset:
+  version: dataset-v1
+  required_inputs:
+    - sector_etfs_daily  # 12 SPDRs (11 sectors + SPY benchmark)
+                          # available 2018-06-19 onward (XLC listed mid-2018)
+
+universe:
+  description: 11 SPDR sector ETFs covering S&P 500 sector decomposition
+  tickers:
+    - XLK   # Technology
+    - XLF   # Financials
+    - XLE   # Energy
+    - XLV   # Health Care
+    - XLY   # Consumer Discretionary
+    - XLP   # Consumer Staples
+    - XLI   # Industrials
+    - XLB   # Materials
+    - XLU   # Utilities
+    - XLRE  # Real Estate
+    - XLC   # Communication Services (listed 2018-06)
+  benchmark: SPY
+
+signal:
+  type: cross_sectional_momentum
+  lookback_months: 12
+  skip_recent_months: 1
+  rationale: >
+    "12-1" momentum (Jegadeesh-Titman default): rank by total return
+    over months t-12 to t-1, skipping the most recent month t to
+    avoid short-term mean-reversion noise. Reversion bias in 1-month
+    returns is well-documented (Jegadeesh 1990).
+
+portfolio_construction:
+  hold_top_n: 3
+  weighting: equal_weight
+  rebalance_frequency: monthly
+  rebalance_day: first_trading_day_of_month
+  rationale: >
+    Top 3 of 11 sectors = ~27% concentration, gives exposure to the
+    momentum factor while spreading some idiosyncratic risk.
+    Equal-weighting is standard; market-cap weighting would
+    over-concentrate in winners.
+
+risk_management:
+  max_position_size: 33.3%   # equal-weight 1/3
+  max_drawdown_kill_threshold: -25%  # if cumulative drawdown reaches -25%, stop
+  no_leverage: true
+  no_shorting: true  # long-only
+  no_options: true
+
+execution:
+  market_orders_at_open: true
+  commissions_assumed: 0  # IBKR retail commission-free on ETFs since 2019
+  slippage_assumed: 0.001  # 10 bps total round-trip on liquid SPDRs
+
+split_policy:
+  train_fraction: 0.6
+  validation_fraction: 0.2
+  holdout_fraction: 0.2
+  basis: >
+    Compute on monthly returns (~94 months from 2018-06 to 2026-04
+    after 12-month lookback consumes the first year). Split 60/20/20.
+
+decision_rules:
+  train_continue_if:
+    - train_total_return > spy_train_total_return  # beat SPY
+    - train_sharpe_annualized >= 0.5
+    - train_max_dd_pct >= -25%  # not catastrophic
+
+  train_kill_if:
+    - train_total_return < 0
+    - train_sharpe_annualized < 0
+    - train_max_dd_pct < -40%
+
+  validation_continue_if:
+    - validation_total_return > 0
+    - validation_sharpe_annualized > 0.3
+    - validation_max_dd_pct > -30%
+
+  holdout_continue_if:
+    - holdout_total_return > 0
+    - holdout_sharpe_annualized > 0
+    - holdout_outperforms_spy_or_within_5pct_after_costs
+
+  always_kill_if:
+    - cumulative_max_dd_pct < -40%
+    - n_consecutive_losing_months > 18
+
+outputs:
+  full_report: research/reports/v9-sector-momentum-full.md
+  full_ledger: research/reports/v9-sector-momentum-full-ledger.csv
+
+caveats:
+  - Universe limited to post-2018-06 (XLC listing date) for full 11-ETF set.
+  - No transaction-cost modeling beyond a simple slippage assumption.
+  - Monthly rebalance ignores within-month drift; real-world deployment
+    would need monitoring for re-ranks.
+  - Past performance not predictive; 7.8 years is a relatively short
+    window for momentum (academic studies use 30+ years).
+  - 12-1 momentum is one of many possible signal definitions
+    (alternatives: 6-1, 3-1, 12-month no skip, etc.); v9 freezes 12-1.
+
+notes:
+  - This is the simplest of the 5 candidate strategies. Edge is
+    well-documented in literature; question is whether magnitude
+    survives in our specific window after costs.
+  - First non-options strategy in the project. If this works, opens
+    a different operational path (no IB Gateway / IBeam needed for
+    daily ETF trades).
