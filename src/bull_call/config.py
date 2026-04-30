@@ -160,6 +160,16 @@ class Settings:
     # event to detect a frozen process during long quiet stretches (waiting
     # for entry, holding through quiet periods between stop-arm and fire).
     heartbeat_interval_sec: int = 300
+    # Session-level crash recovery: if ``_run_one_session`` raises an
+    # unexpected exception, sleep this long before the next attempt rather
+    # than crashing the daemon (which would force ASG to respawn + IBeam
+    # to re-auth + 2FA). 5 min gives transient infra hiccups time to settle.
+    session_error_backoff_sec: int = 300
+    # Hard ceiling on consecutive session errors. If this many sessions in
+    # a row throw, give up and exit so ASG respawns with fresh state — at
+    # that point we're probably stuck on a deeper bug, and a clean restart
+    # is the safest path.
+    session_error_max_consecutive: int = 5
 
 
 def load_settings(env: dict[str, str] | None = None) -> Settings:
@@ -216,6 +226,13 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         src, "HEARTBEAT_INTERVAL_SEC", default=300,
     )
 
+    session_error_backoff_sec = _parse_positive_int(
+        src, "SESSION_ERROR_BACKOFF_SEC", default=300,
+    )
+    session_error_max_consecutive = _parse_positive_int(
+        src, "SESSION_ERROR_MAX_CONSECUTIVE", default=5,
+    )
+
     entry_time_et = _parse_time(src.get("ENTRY_TIME_ET", "10:30"), "ENTRY_TIME_ET")
     entry_deadline_et = _parse_time(
         src.get("ENTRY_DEADLINE_ET", "13:00"), "ENTRY_DEADLINE_ET",
@@ -251,4 +268,6 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         monitoring_reconnect_max_attempts=monitoring_reconnect_max_attempts,
         monitoring_quote_max_blind_sec=monitoring_quote_max_blind_sec,
         heartbeat_interval_sec=heartbeat_interval_sec,
+        session_error_backoff_sec=session_error_backoff_sec,
+        session_error_max_consecutive=session_error_max_consecutive,
     )

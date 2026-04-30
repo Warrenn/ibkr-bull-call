@@ -101,9 +101,53 @@ class Scheduler:
         )
         heartbeat_thread.start()
 
+        # Crash-recovery counter for the inner loop: an unexpected
+        # exception in ``_run_one_session`` shouldn't kill the daemon
+        # outright — that forces ASG to respawn + IBeam to re-auth + 2FA,
+        # an expensive sequence for what may be a transient blip. Instead
+        # we log + emit an event + back off; only after
+        # ``session_error_max_consecutive`` failures in a row do we exit
+        # so ASG respawns with fresh state.
+        consecutive_errors = 0
+        backoff_s = float(self._settings.session_error_backoff_sec)
+        max_consecutive = self._settings.session_error_max_consecutive
+
         try:
             while not self._stop_event.is_set():
-                self._run_one_session()
+                try:
+                    self._run_one_session()
+                except (KeyboardInterrupt, SystemExit):
+                    # Operator signal — never swallow; let it propagate so
+                    # the finally-block disconnects the gateway cleanly.
+                    raise
+                except Exception as exc:
+                    consecutive_errors += 1
+                    log.exception(
+                        "_run_one_session raised %s (consecutive=%d/%d)",
+                        type(exc).__name__, consecutive_errors, max_consecutive,
+                    )
+                    events.emit(
+                        "session_error",
+                        error_type=type(exc).__name__,
+                        message=str(exc),
+                        consecutive=consecutive_errors,
+                        max_consecutive=max_consecutive,
+                    )
+                    if consecutive_errors >= max_consecutive:
+                        events.emit(
+                            "circuit_breaker_open",
+                            consecutive_errors=consecutive_errors,
+                            reason="session_error_max_consecutive_reached",
+                        )
+                        log.error(
+                            "circuit breaker open after %d consecutive "
+                            "session errors; exiting so ASG can respawn",
+                            consecutive_errors,
+                        )
+                        return
+                    self._stop_event.wait(timeout=backoff_s)
+                else:
+                    consecutive_errors = 0
         finally:
             self._stop_event.set()
             heartbeat_thread.join(timeout=5.0)

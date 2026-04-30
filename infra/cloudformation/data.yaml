@@ -34,7 +34,9 @@ Parameters:
         "monitoringQuoteGraceSec": 15,
         "monitoringReconnectMaxAttempts": 3,
         "monitoringQuoteMaxBlindSec": 60,
-        "heartbeatIntervalSec": 300
+        "heartbeatIntervalSec": 300,
+        "sessionErrorBackoffSec": 300,
+        "sessionErrorMaxConsecutive": 5
       }
     Description: |
       JSON blob of bot strategy settings. CamelCase keys per the existing
