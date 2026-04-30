@@ -107,6 +107,22 @@ def filter_calendar_to_window(
     ].copy()
 
 
+def filter_calendar_excluding_events(
+    calendar: pd.DataFrame,
+    *,
+    excluded_dates: set[dt.date],
+) -> pd.DataFrame:
+    """Drop rows whose ``date`` is in ``excluded_dates``.
+
+    Used by v2 to remove FOMC / CPI / NFP / OPEX days from the
+    eligibility window. Empty ``excluded_dates`` is a no-op.
+    """
+
+    if not excluded_dates:
+        return calendar
+    return calendar[~calendar["date"].isin(excluded_dates)].copy()
+
+
 def evaluate_candidate(
     *,
     bars: pd.DataFrame,
@@ -271,6 +287,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--report", type=Path, required=True)
     p.add_argument("--csv", type=Path, required=True)
     p.add_argument("--code-revision", default="HEAD")
+    p.add_argument(
+        "--event-calendar", type=Path, default=None,
+        help="Optional event_calendar.parquet — dates listed here are "
+             "excluded from eligibility (v2 event-filter). Schema: "
+             "date, event_type.",
+    )
     return p.parse_args(argv)
 
 
@@ -285,6 +307,16 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError(
             f"calendar has zero rows in window {args.window_start} → {args.window_end}",
         )
+
+    excluded_count = 0
+    if args.event_calendar is not None:
+        events = pd.read_parquet(args.event_calendar)
+        excluded_dates = set(events["date"].tolist())
+        before = len(cal_window)
+        cal_window = filter_calendar_excluding_events(
+            cal_window, excluded_dates=excluded_dates,
+        )
+        excluded_count = before - len(cal_window)
 
     results = sweep(bars=bars, calendar=cal_window)
 
@@ -323,6 +355,8 @@ def main(argv: list[str] | None = None) -> int:
     pd.DataFrame(rows).to_csv(args.csv, index=False)
 
     print(f"sweep window: {args.window_name} ({args.window_start} → {args.window_end})")
+    if args.event_calendar is not None:
+        print(f"event filter: excluded {excluded_count} event days from window")
     print(f"candidates evaluated: {len(results)}")
     if results:
         top = results[0]
