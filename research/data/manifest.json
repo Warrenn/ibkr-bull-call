@@ -228,6 +228,40 @@
       ]
     },
     {
+      "name": "sector_etfs_daily",
+      "status": "populated",
+      "source": "Yahoo Finance auto-adjusted close via yfinance",
+      "vendor": "Yahoo Finance",
+      "license": "Public free data; usage governed by Yahoo's terms (research-only single-seat is in scope)",
+      "acquired_at": "2026-04-30",
+      "path": "research/data/dataset-v1/sector_etfs_daily.parquet",
+      "generator": "research/scripts/download_sector_etfs.py",
+      "symbols": [
+        "XLK", "XLF", "XLE", "XLV", "XLY", "XLP",
+        "XLI", "XLB", "XLU", "XLRE", "XLC", "SPY"
+      ],
+      "resolution": "daily Close (auto-adjusted for splits + dividends)",
+      "date_range": {
+        "start": "2016-01-04",
+        "end": "2026-04-30"
+      },
+      "row_count": 2596,
+      "all_tickers_available_from": "2018-06-19",
+      "all_tickers_available_from_note": "XLC (Communication Services) listed 2018-06-19; rows before that have NaN in the XLC column.",
+      "checksum": "sha256:03e85be2f80547de9d0f882ea084d37a359d771244a6800a261542f820605781",
+      "schema": [
+        "date",
+        "XLK", "XLF", "XLE", "XLV", "XLY", "XLP",
+        "XLI", "XLB", "XLU", "XLRE", "XLC",
+        "SPY"
+      ],
+      "known_limitations": [
+        "Yahoo's auto-adjusted close folds in splits + dividend reinvestment, so values are total-return-adjusted (the right basis for momentum + DCA studies but not for nominal-price reasoning).",
+        "Same Yahoo-revision caveat as vix_daily/tlt_daily: the pinned sha256 is the snapshot at acquisition; a future re-pull producing a different sha256 means upstream data drifted.",
+        "Daily resolution only — no intraday for these ETFs."
+      ]
+    },
+    {
       "name": "trading_calendar",
       "status": "populated",
       "source": "NYSE schedule via pandas_market_calendars",
