@@ -89,6 +89,20 @@ case "$ACTION" in
     destroy)
         # Reverse order: compute → network → data
         for s in compute network data; do destroy_one "$s"; done
+        echo
+        echo "stacks deleted, but stateful resources are RETAINED on purpose:"
+        echo "  - DynamoDB table:  bull-call-${ENV}-state"
+        echo "  - S3 release tarballs:  bull-call-${ENV}-artifacts-<account-id>"
+        echo
+        echo "they hold operator-critical data (trade history, release"
+        echo "history) and survive 'destroy' so a wrong-env / fat-finger /"
+        echo "automation glitch can't wipe them."
+        echo
+        echo "to fully wipe (irreversible):"
+        echo "  aws dynamodb delete-table --table-name bull-call-${ENV}-state \\"
+        echo "    --profile ${PROFILE} --region ${REGION}"
+        echo "  aws s3 rb s3://bull-call-${ENV}-artifacts-\$(aws sts get-caller-identity --query Account --output text --profile ${PROFILE}) \\"
+        echo "    --force --profile ${PROFILE} --region ${REGION}"
         ;;
     *)
         echo "usage: $0 [validate|deploy|status|destroy] [dev|live]" >&2
