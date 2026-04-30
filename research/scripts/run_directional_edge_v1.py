@@ -421,6 +421,7 @@ def run(
     window_start: dt.date | None = None,
     window_end: dt.date | None = None,
     event_calendar_path: Path | None = None,
+    vix_data_path: Path | None = None,
 ) -> DirectionalEdgeResult:
     """Run a directional-edge spec on a (possibly-filtered) calendar window.
 
@@ -447,6 +448,25 @@ def run(
         events = pd.read_parquet(event_calendar_path)
         excluded = set(events["date"].tolist())
         cal = cal[~cal["date"].isin(excluded)]
+
+    # Optional VIX filter — active when the spec contains a
+    # ``vix_filter`` section with ``enabled: true`` AND a vix_data
+    # parquet is supplied. The threshold is read from the spec
+    # (pinned at v3-freeze time on TRAIN data) so validation uses the
+    # same band boundary as TRAIN.
+    vix_cfg = spec.get("vix_filter", {})
+    if vix_cfg.get("enabled") and vix_data_path is not None:
+        from research.scripts.sweep_directional_edge import (
+            compute_prior_vix_by_date, filter_calendar_by_vix_band,
+        )
+        vix_df = pd.read_parquet(vix_data_path)
+        prior_vix = compute_prior_vix_by_date(vix_df)
+        cal = filter_calendar_by_vix_band(
+            cal,
+            prior_vix_by_date=prior_vix,
+            band=vix_cfg["band"],
+            median=float(vix_cfg["prior_vix_threshold"]),
+        )
 
     sig = spec["signal"]
     horiz = spec["horizon"]
@@ -515,6 +535,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--event-calendar", type=Path, default=None,
                    help="Optional event_calendar.parquet — dates listed are "
                         "excluded from eligibility (v2 event-filter)")
+    p.add_argument("--vix-data", type=Path, default=None,
+                   help="Optional vix_daily.parquet — used by v3+ when the "
+                        "spec contains a vix_filter section with "
+                        "enabled: true")
     return p.parse_args(argv)
 
 
@@ -534,6 +558,7 @@ def main(argv: list[str] | None = None) -> int:
         window_start=args.window_start,
         window_end=args.window_end,
         event_calendar_path=args.event_calendar,
+        vix_data_path=args.vix_data,
     )
     print(f"verdict: {result.metrics.verdict}")
     print(f"trade_count: {result.metrics.trade_count}")

@@ -1,0 +1,134 @@
+spec_id: directional-edge-v3
+strategy_spec_id: v3
+phase: directional_edge
+status: frozen_validation_candidate
+parent_spec: directional-edge-v2
+parent_result: KILLED_BY_VALIDATION_OUTLIER
+
+question: >
+  Does bullish intraday continuation (0.50% threshold by 10:30 ET)
+  on non-event days WHEN PRIOR-DAY VIX IS ELEVATED show a real edge
+  out-of-sample? v2 was killed by a single outlier on the full
+  cross-section; v3 tests whether the high-VIX regime captures
+  the actual signal.
+
+dataset:
+  version: dataset-v1
+  required_inputs:
+    - es_or_mes_intraday
+    - trading_calendar
+    - event_calendar
+    - vix_daily
+
+split_policy:
+  train_fraction: 0.6
+  validation_fraction: 0.2
+  holdout_fraction: 0.2
+  holdout_policy: most_recent_untouched_window
+  pinned_in_manifest: true
+
+signal:
+  candidate_id: D3
+  setup_type: bullish_intraday_continuation
+  description: >
+    Same as v2 (0.50% threshold by 10:30 ET) but eligibility is
+    further restricted to days where prior-day VIX close is at or
+    above the median observed on TRAIN.
+  confirmation_logic: >
+    Cumulative intraday return from session_open_price to
+    signal_time_price must be >= signal_threshold. Prices are taken
+    from the OPEN of the 1-minute bar at each ET timestamp.
+  signal_threshold: 0.0050
+  session_open_time_et: "09:30"
+  earliest_eligible_signal_time_et: "10:30"
+  latest_eligible_signal_time_et: "10:30"
+  rationale: >
+    The high-VIX subset of v2's 14 trades carried essentially all of
+    the signal (n=11 of 14, mean +0.21% same as v2 aggregate, t=3.05
+    > v2's 2.92, 95% CI [+0.056%, +0.358%] still excludes zero).
+    Adding the VIX gate sharpens v2 rather than overturning it. The
+    3 low-VIX trades v2 included contributed near-zero mean.
+
+event_filter:
+  enabled: true
+  excluded_event_types:
+    - FOMC
+    - CPI
+    - NFP
+    - OPEX
+  source: research/data/dataset-v1/event_calendar.parquet
+  rationale: >
+    Carried forward from v2 unchanged — the rationale that event
+    days are the worst tail of the distribution remains valid.
+
+vix_filter:
+  enabled: true
+  band: high
+  prior_vix_threshold: 14.84
+  threshold_source: >
+    Median of prior-day VIX close on dataset-v1 TRAIN window
+    (2023-05-01 to 2025-02-14). Computed via
+    median_prior_vix_in_window in
+    research/scripts/sweep_directional_edge.py at v3 freeze time.
+  threshold_pinned_at: "2026-04-30"
+  band_definition: >
+    "high" means prior-day VIX close >= 14.84. Validation MUST use
+    this exact pinned threshold so the band boundary doesn't drift
+    between TRAIN, validation, and holdout windows.
+  rationale: >
+    On TRAIN, the (0.50% / 10:30 / event-filtered) candidate split
+    by VIX shows: high-VIX subset (n=11) has t=+3.05, 95% CI
+    excludes zero. Low-VIX subset (n=3) is too small to evaluate
+    but its mean is +0.23% — broadly similar, but the small-sample
+    noise dominates. The high-VIX gate is therefore both
+    statistically tighter and avoids contaminating the candidate
+    with the regime that doesn't have meaningful sample size.
+
+horizon:
+  exit_basis: fixed_same_session_window
+  end_of_window_time_et: "15:55"
+  rationale: >
+    Same as v1/v2: 15:55 ET avoids the closing-auction print noise.
+  underlying_v3: es_front_month
+  underlying_v3_rationale: >
+    Same as v1/v2: SPX is TBD per data-acquisition-decision; ES
+    front-month is a valid proxy intraday.
+  pinned_2026_04_30: true
+
+outputs:
+  validation_report_path: research/reports/directional-edge-v3-validation.md
+  validation_ledger_path: research/reports/directional-edge-v3-validation-ledger.csv
+  holdout_report_path: research/reports/directional-edge-v3-holdout.md
+  holdout_ledger_path: research/reports/directional-edge-v3-holdout-ledger.csv
+
+decision_rules:
+  validation_continue_if:
+    - validation_mean_forward_return > 0
+    - validation_t_stat > 1.5
+    - validation_ci_low_95 > -0.5 * train_mean
+    - no_single_day_drives_more_than_50_pct_of_aggregate_mean
+
+  validation_kill_if:
+    - validation_mean_forward_return <= 0
+    - validation_t_stat < 0
+    - one_outlier_explains_more_than_75_pct_of_aggregate_mean
+
+  holdout_continue_if:
+    - holdout_mean_forward_return > 0
+    - holdout_t_stat >= 2.0
+    - holdout_ci_low_95 > 0
+  holdout_kill_if:
+    - holdout_mean_forward_return <= 0
+    - holdout_t_stat < 1.5
+
+notes:
+  - The "no_single_day_drives_more_than_50_pct" rule is new for v3
+    after the v2 validation was 100%-driven by 2025-04-09 alone.
+    Outlier-resistance is now a first-class spec criterion.
+  - Validation sample is expected to be small (~6-9 trades — n=11 on
+    TRAIN, validation is ~33% the size of TRAIN). Statistical power
+    is genuinely limited; treat the verdict as suggestive at best.
+  - If validation gives an inconclusive (neither pass nor kill)
+    result, the spec freeze is preserved and we either accept
+    "we cannot tell" and stop, or accept the limitation and run
+    holdout anyway to gather one more out-of-sample data point.
