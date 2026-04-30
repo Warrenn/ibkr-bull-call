@@ -28,7 +28,7 @@ Track each item as `TODO`, `DOING`, `DONE`, `BLOCKED`, or `KILLED`.
 | Phase 0 repo audit | DONE | "Notes From Current Repo State" below + PRs #41 #42 | me | Every code-side §3 P0/P1 closed; the two strategy hypotheses (strikes / stop) are deferred to §5.A / §5.B ablation per CONTRIBUTING.md |
 | Data inventory | DONE | `docs/data-inventory.md` | me | Verdict 2026-04-30: Phase 1 + 2 BLOCKED on data acquisition (3 of 4 manifest entries TBD); only `trading_calendar` populated. Code is not the bottleneck. |
 | Strategy spec freeze | DONE | `docs/STRATEGY-SPEC-v1.md` | me | Frozen 2026-04-30 — sizing/overlays/pre-run checklist added; entry/exit window timestamps deferred to YAML pre-run pins |
-| Directional edge test | TODO | `artifacts/directional-edge-v1/` | me | Fastest falsification step |
+| Directional edge test | DONE | `research/reports/directional-edge-v1.md` | me | 2026-04-30 — Simple verdict EDGE_PRESENT (mean +0.0742%) but t-stat=0.88, p=0.382, 95% CI includes zero. Nuanced verdict EDGE_INCONCLUSIVE. 2024 year-slice negative. Continue/kill decision pending. |
 | Minimal post-cost control backtest | TODO | `artifacts/control-backtest-v1/` | me | Must be reproducible |
 | Trade-expression comparison | TODO | `artifacts/expression-comparison-v1/` | me | Spread vs long call vs ES/MES |
 | Ablation matrix | TODO | `artifacts/ablation-v1/` | me | Add only after control exists |
@@ -72,13 +72,21 @@ These are the items worth doing immediately.
   candidates listed without commitment; the buy decision lives in a
   separate `docs/data-acquisition-decision.md` (not yet written).**
 
-- [ ] Run the fastest falsification test first: directional edge without the
+- [x] Run the fastest falsification test first: directional edge without the
   options wrapper.
   Measure: SPX or ES/MES forward return distribution from the intended
   confirmation time to the intended exit window, sliced by regime if possible.
-  Output: `artifacts/directional-edge-v1/summary.md`.
+  Output: `research/reports/directional-edge-v1.md`.
   Exit: one of two outcomes is explicit:
   `EDGE PRESENT` or `NO EDGE`.
+  **Status: DONE 2026-04-30 — Simple verdict `EDGE_PRESENT` (mean
+  +0.0742% per trade, n=147 over 732 sessions, hit rate 61.9%) but
+  the *nuanced* verdict is `EDGE_INCONCLUSIVE`: t-stat = 0.88,
+  p = 0.382, 95% CI [-0.0931%, +0.2415%] includes zero. The 2024
+  year-slice is negative (-0.0242%) so the apparent edge is also
+  somewhat regime-dependent. Underlying is ES front-month (SPX TBD).
+  See `research/reports/directional-edge-v1.md` for the full report
+  with statistical context and per-year breakdown.**
 
 - [ ] Decide whether to continue based on the directional test before building
   more machinery.
