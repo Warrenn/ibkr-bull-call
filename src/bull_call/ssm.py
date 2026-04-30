@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -116,9 +117,22 @@ def load_settings_via_ssm(
 ) -> Settings:
     """Build a :class:`Settings` from the SSM ``<prefix>/settings`` parameter.
 
-    Static fields not exposed via SSM (``IB_HOST``, ``IB_PORT``) keep their
-    Settings defaults. ``client`` is injectable for tests; production passes
-    a real ``boto3.client('ssm')``.
+    Precedence in deployed mode (this code path runs only when
+    ``SSM_PREFIX`` is set, see ``__main__._load_settings``):
+
+    - **Process env is the base.** Infra-set keys like ``STATE_TABLE`` and
+      ``AWS_REGION`` are written into ``/etc/bull-call/bot.env`` from the
+      CloudFormation stack and must flow through to ``Settings``.
+    - **SSM JSON overrides on collision.** SSM is the canonical place to
+      express deployed strategy parameters (``MAX_LOSS_USD``, ``POP_THRESHOLD``,
+      etc.); when both env and SSM set the same key, SSM wins.
+
+    Local-testing mode (``SSM_PREFIX`` unset) routes through ``load_settings()``
+    via ``__main__._load_settings`` and never reaches this function — so env
+    wins trivially there because SSM is not consulted.
+
+    ``client`` is injectable for tests; production passes a real
+    ``boto3.client('ssm')``.
     """
 
     if client is None:
@@ -128,7 +142,9 @@ def load_settings_via_ssm(
 
     overrides = fetch_settings_overrides(client, prefix=prefix)
     log.info("loaded %d settings keys from %s", len(overrides), prefix)
-    return load_settings(env=overrides)
+    merged = dict(os.environ)
+    merged.update(overrides)
+    return load_settings(env=merged)
 
 
 @dataclass

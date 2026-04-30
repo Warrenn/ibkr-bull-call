@@ -90,8 +90,18 @@ artifacts.
 ```bash
 uv sync --extra dev          # creates .venv with all deps
 uv run pytest -q             # runs the full test suite (no IBKR needed)
-uv run mypy src              # type check
+uv run mypy src              # type check (see note below)
 ```
+
+**About `uv run mypy src`:** the bare command will report ~12
+missing-library-stubs warnings for `boto3`, `botocore.exceptions`,
+`boto3.dynamodb.conditions`, `ibind`, and `pandas_market_calendars` — none
+of those publish upstream stubs, and they're explicitly allow-listed in
+[`.github/workflows/ci.yml`](./.github/workflows/ci.yml). CI's mypy job
+treats *only* errors outside that allow-list as failures; if your local
+output shows just those known warnings (and no real type errors), you're
+in the same state CI considers passing. To replicate CI's filter exactly,
+the workflow YAML has the canonical grep pipeline.
 
 ## Configuration
 

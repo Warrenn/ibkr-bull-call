@@ -400,17 +400,38 @@ def test_next_entry_time_returns_today_when_pre_entry(store: Store) -> None:
 
 
 def test_next_entry_time_skips_to_tomorrow_when_past_entry(store: Store) -> None:
-    """Now is AFTER today's entry time → roll forward to next trading
-    day's entry time."""
+    """Now is AFTER today's CLOSE → roll forward to next trading day's
+    entry time. (Post-entry but pre-close is a mid-session restart and
+    handled by ``test_next_entry_time_returns_today_when_mid_session``.)"""
 
     sched = Scheduler(_settings(entry_time_et=dt.time(10, 30)), store)
-    # 2026-04-29 20:00 UTC = 16:00 ET, after entry has passed
-    now = dt.datetime(2026, 4, 29, 20, 0, tzinfo=dt.timezone.utc)
+    # 2026-04-29 21:30 UTC = 17:30 ET, well past 16:00 ET cash settlement.
+    now = dt.datetime(2026, 4, 29, 21, 30, tzinfo=dt.timezone.utc)
     next_entry = sched._next_entry_time(now)
     next_et_date = next_entry.astimezone(_ET).date()
     # Should land on 2026-04-30 (Thursday).
     assert next_et_date == dt.date(2026, 4, 30)
     assert next_entry.astimezone(_ET).time() == dt.time(10, 30)
+
+
+def test_next_entry_time_returns_today_when_mid_session(store: Store) -> None:
+    """Mid-session restart: now is past today's entry time but BEFORE the
+    close. Return today's entry time (which is in the past) so the caller's
+    ``_sleep_until`` short-circuits via the "target already passed" branch
+    and the session resumes reconcile + monitor + settlement.
+
+    Without this, an instance replacement at 11:00 ET silently skips the
+    rest of the day — contradicts the documented self-healing model where
+    DynamoDB state and an IBKR-side position survive instance loss."""
+
+    sched = Scheduler(_settings(entry_time_et=dt.time(10, 30)), store)
+    # 2026-04-29 16:00 UTC = 12:00 ET — past 10:30 entry, well before 16:00 close.
+    now = dt.datetime(2026, 4, 29, 16, 0, tzinfo=dt.timezone.utc)
+    next_entry = sched._next_entry_time(now)
+    # Today's entry time (in the past relative to ``now``).
+    assert next_entry.astimezone(_ET).date() == dt.date(2026, 4, 29)
+    assert next_entry.astimezone(_ET).time() == dt.time(10, 30)
+    assert next_entry < now  # past — _sleep_until will return immediately
 
 
 def test_next_entry_time_skips_weekend(store: Store) -> None:
@@ -686,6 +707,79 @@ def test_record_settlements_skips_when_spot_unavailable(
     assert any("cannot fetch settle spot" in r.getMessage() for r in caplog.records)
 
 
+@pytest.mark.parametrize(
+    "garbage_spot",
+    [0.0, 1.0, 50.0, 100_000.0, 999_999.0],
+    ids=["zero", "one", "tiny", "huge", "absurd"],
+)
+def test_record_settlements_rejects_garbage_spot_outside_sanity_band(
+    store: Store, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture, garbage_spot: float,
+) -> None:
+    """A post-close fetch_spot value wildly outside the strike range
+    indicates a stale or corrupted quote (data feed glitch, wrong symbol,
+    cached off-hours value). Refuse to settle — row stays OPEN, operator
+    can manually settle later. We bound the sanity band at 50%–200% of
+    long_strike: tighter would false-positive on real crash days; looser
+    would let obvious garbage through.
+
+    NOTE: this is the *defensive* layer. The deeper issue is that
+    ``fetch_spot`` is itself a post-close spot snapshot, not the official
+    CBOE SPX SET print — tracked as a Phase 1 data-validation deliverable
+    in docs/live-capital-go-no-go.md."""
+
+    sched = Scheduler(_settings(), store)
+    sched._client = _UnderlyingLookupClient()  # type: ignore[assignment]
+
+    store.record_open(
+        date="2026-04-29", symbol="SPX",
+        long_strike=4995.0, short_strike=5005.0, debit=5.50,
+        opened_at="2026-04-29T14:30:00+00:00",
+    )
+    monkeypatch.setattr(
+        "bull_call.scheduler.fetch_spot",
+        lambda _client, *, conid: garbage_spot,
+    )
+    caplog.set_level(logging.ERROR, logger="bull_call.scheduler")
+
+    sched._record_settlements(dt.date(2026, 4, 29))
+
+    rec = store.get_spread("2026-04-29#SPX")
+    assert rec.status == "OPEN", (
+        f"garbage settle spot={garbage_spot} must NOT be persisted to DDB"
+    )
+    assert any(
+        "outside sanity band" in r.getMessage() for r in caplog.records
+    ), "expected explicit 'outside sanity band' error log"
+
+
+def test_record_settlements_accepts_realistic_crash_day_spot(
+    store: Store, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real one-day -10% SPX move (rare but historical) must NOT be
+    rejected as garbage. The sanity band is wide enough to admit it."""
+
+    sched = Scheduler(_settings(), store)
+    sched._client = _UnderlyingLookupClient()  # type: ignore[assignment]
+
+    store.record_open(
+        date="2026-04-29", symbol="SPX",
+        long_strike=5000.0, short_strike=5010.0, debit=5.50,
+        opened_at="2026-04-29T14:30:00+00:00",
+    )
+    crash_day_spot = 4495.0  # ~10% below the long strike — plausible
+    monkeypatch.setattr(
+        "bull_call.scheduler.fetch_spot",
+        lambda _client, *, conid: crash_day_spot,
+    )
+
+    sched._record_settlements(dt.date(2026, 4, 29))
+
+    rec = store.get_spread("2026-04-29#SPX")
+    assert rec.status == "SETTLED"
+    assert rec.settle_value == pytest.approx(crash_day_spot)
+
+
 # ---------- _monitor_open_spreads error branches ---------------------------
 
 
@@ -833,3 +927,154 @@ def test_run_forever_propagates_signal_exceptions(
     with pytest.raises(type(raised)):
         sched.run_forever()
     assert len(calls) == 1
+
+
+# ---------- _run_one_session settlement gate -------------------------------
+
+
+def _stub_session_internals(
+    sched: Scheduler, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replace every side-effecty step inside _run_one_session except
+    _sleep_until and _record_settlements with no-ops, so a test can drive
+    the session loop end-to-end without IBKR / strategy machinery.
+
+    Leaves _sleep_until and _record_settlements alone so the caller can
+    inspect or substitute them per-test.
+    """
+
+    sched._client = object()  # type: ignore[assignment]
+    sched._account_id = "A1"
+    monkeypatch.setattr(sched, "_reconcile_with_ibkr", lambda d: None)
+    monkeypatch.setattr(
+        "bull_call.scheduler.cancel_orphaned_combo_orders",
+        lambda c, *, account_id: 0,
+    )
+    monkeypatch.setattr(sched, "_run_symbol", lambda *a, **kw: None)
+    monkeypatch.setattr(sched, "_monitor_open_spreads", lambda *a, **kw: None)
+
+
+def test_run_one_session_skips_settlements_when_close_sleep_interrupted(
+    store: Store, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A graceful SIGTERM after monitor returns but before close+1m sleeps
+    elapses must NOT mark any open spread SETTLED locally — the IBKR
+    position is still on the books and would be stranded if the local row
+    is corrupted to status=SETTLED. Next instance's reconcile-on-startup
+    re-adopts the OPEN row instead."""
+
+    sched = Scheduler(_settings(), store)
+    _stub_session_internals(sched, monkeypatch)
+
+    # Pin a known trading day so session_times succeeds.
+    today_et = dt.date(2026, 4, 29)  # Wednesday
+    entry_utc = dt.datetime.combine(
+        today_et, dt.time(10, 30), tzinfo=_ET,
+    ).astimezone(dt.timezone.utc)
+    monkeypatch.setattr(sched, "_next_entry_time", lambda now: entry_utc)
+
+    # _sleep_until returns True for the entry-sleep, False for the close-sleep
+    # (simulating a shutdown after monitor returns but before settlement).
+    sleep_calls: list[dt.datetime] = []
+
+    def fake_sleep(target: dt.datetime) -> bool:
+        sleep_calls.append(target)
+        return len(sleep_calls) == 1  # True only on first call
+
+    monkeypatch.setattr(sched, "_sleep_until", fake_sleep)
+
+    settle_calls: list[dt.date] = []
+    monkeypatch.setattr(
+        sched, "_record_settlements",
+        lambda d: settle_calls.append(d),
+    )
+
+    sched._run_one_session()
+
+    # Two sleeps observed: entry + close+1m.
+    assert len(sleep_calls) == 2, sleep_calls
+    # CRITICAL: settlement was NOT called when shutdown interrupted close-sleep.
+    assert settle_calls == [], (
+        "settlement should be gated on close-sleep success — running it on "
+        "shutdown corrupts the local store and strands the IBKR position"
+    )
+
+
+def test_run_one_session_records_settlements_when_close_sleep_completes(
+    store: Store, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Happy path complement to the gate test above: when close+1m sleeps
+    through to completion, settlement DOES run."""
+
+    sched = Scheduler(_settings(), store)
+    _stub_session_internals(sched, monkeypatch)
+
+    today_et = dt.date(2026, 4, 29)
+    entry_utc = dt.datetime.combine(
+        today_et, dt.time(10, 30), tzinfo=_ET,
+    ).astimezone(dt.timezone.utc)
+    monkeypatch.setattr(sched, "_next_entry_time", lambda now: entry_utc)
+    monkeypatch.setattr(sched, "_sleep_until", lambda target: True)
+
+    settle_calls: list[dt.date] = []
+    monkeypatch.setattr(
+        sched, "_record_settlements",
+        lambda d: settle_calls.append(d),
+    )
+
+    sched._run_one_session()
+
+    assert settle_calls == [today_et]
+
+
+def test_run_one_session_resumes_today_when_started_mid_session(
+    store: Store, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Drive _run_one_session at a simulated mid-session ``now`` (post-entry,
+    pre-close) and assert the session for *today* runs end-to-end —
+    reconcile, monitor, and settlement — rather than sleeping straight
+    through to tomorrow's entry.
+
+    This is the canonical instance-replacement / restart scenario the infra
+    self-healing story depends on."""
+
+    sched = Scheduler(_settings(), store)
+    _stub_session_internals(sched, monkeypatch)
+
+    today_et = dt.date(2026, 4, 29)
+    # Simulate an 11:30 ET restart: past 10:30 entry, well before 16:00 close.
+    fake_now = dt.datetime(2026, 4, 29, 15, 30, tzinfo=dt.timezone.utc)
+
+    class _FakeDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> dt.datetime:
+            return fake_now if tz is None else fake_now.astimezone(tz)
+
+    monkeypatch.setattr("bull_call.scheduler.dt.datetime", _FakeDateTime)
+
+    # Track which side-effects ran for today. Each stub records its date arg.
+    reconcile_dates: list[dt.date] = []
+    monkeypatch.setattr(
+        sched, "_reconcile_with_ibkr",
+        lambda d: reconcile_dates.append(d),
+    )
+    monitor_dates: list[dt.date] = []
+    monkeypatch.setattr(
+        sched, "_monitor_open_spreads",
+        lambda day, close: monitor_dates.append(day),
+    )
+    settle_dates: list[dt.date] = []
+    monkeypatch.setattr(
+        sched, "_record_settlements",
+        lambda d: settle_dates.append(d),
+    )
+    monkeypatch.setattr(sched, "_sleep_until", lambda target: True)
+
+    sched._run_one_session()
+
+    assert reconcile_dates == [today_et], (
+        "mid-session restart must reconcile against IBKR for TODAY, "
+        "not skip to the next session"
+    )
+    assert monitor_dates == [today_et]
+    assert settle_dates == [today_et]

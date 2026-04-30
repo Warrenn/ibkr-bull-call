@@ -187,8 +187,12 @@ Resources:
                   -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
               systemctl enable --now amazon-cloudwatch-agent
 
-              # uv for Python dep mgmt
-              curl -LsSf https://astral.sh/uv/install.sh | sh
+              # uv for Python dep mgmt — version-pinned installer URL so a
+              # supply-chain compromise of astral.sh CDN can't silently drop
+              # an arbitrary uv binary onto a trading host. Ratchet by
+              # checking https://github.com/astral-sh/uv/releases and
+              # bumping the version in the URL below.
+              curl -LsSf https://astral.sh/uv/0.11.8/install.sh | sh
               install -m 0755 /root/.local/bin/uv /usr/local/bin/uv
 
               # Download the release tarball from the artifacts bucket.
