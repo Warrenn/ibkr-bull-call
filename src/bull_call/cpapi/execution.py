@@ -250,13 +250,30 @@ def submit_close_market(
     return FillReport(filled=False, avg_fill_price=math.nan, order_id=order_id)
 
 
-# Statuses that mean an order is still working at IBKR (and thus a candidate
-# for orphan cleanup). Anything else (Filled, Cancelled, Inactive, Rejected)
-# is terminal — leave it.
-_WORKING_STATUSES = frozenset({
-    "submitted", "presubmitted", "pre_submitted",
-    "pending_submit", "pending_cancel",
-})
+# Filter tokens we send to ``live_orders`` (CPAPI / ibind canonical form,
+# all lowercase snake_case per ibind's docstring) — every status here is
+# one we'd consider "still working at IBKR" and thus a candidate for orphan
+# cleanup. Anything else (Filled, Cancelled, Inactive, Rejected) is
+# terminal — leave it.
+_LIVE_ORDER_FILTERS: tuple[str, ...] = (
+    "submitted", "pre_submitted", "pending_submit", "pending_cancel",
+)
+
+
+def _normalize_status(value: str) -> str:
+    """IBKR can render the same state in multiple shapes (``PreSubmitted``,
+    ``pre_submitted``, ``presubmitted``); normalize them all to a single
+    token so the working-status check doesn't depend on capitalization or
+    underscoring."""
+
+    return value.lower().replace("_", "").replace(" ", "")
+
+
+# Derived from the filter tokens — guaranteed in lockstep so an IBKR
+# server-side filter cannot drop a status we'd otherwise act on.
+_WORKING_STATUSES = frozenset(
+    _normalize_status(t) for t in _LIVE_ORDER_FILTERS
+)
 
 
 def _is_orphan_combo(order: dict[str, Any]) -> bool:
@@ -268,7 +285,7 @@ def _is_orphan_combo(order: dict[str, Any]) -> bool:
     """
 
     sec_type = (order.get("secType") or order.get("sec_type") or "").upper()
-    status = (order.get("status") or "").lower()
+    status = _normalize_status(order.get("status") or "")
     conidex = order.get("conidex") or ""
     if sec_type != "BAG":
         return False
@@ -296,7 +313,7 @@ def cancel_orphaned_combo_orders(
     """
 
     try:
-        resp = client.live_orders(filters=["submitted", "pre_submitted"])
+        resp = client.live_orders(filters=list(_LIVE_ORDER_FILTERS))
     except Exception as exc:
         log.warning("live_orders query failed at session start: %s", exc)
         return 0
@@ -307,6 +324,14 @@ def cancel_orphaned_combo_orders(
     elif isinstance(raw, list):
         orders = raw
     else:
+        # An unexpected response shape would silently make this a no-op,
+        # which is the worst outcome — orphans never cleaned up and the
+        # operator has no signal that something's wrong. Log loudly.
+        log.warning(
+            "live_orders returned unexpected shape (%s); skipping orphan "
+            "cleanup. This may indicate an ibind / CPAPI schema change.",
+            type(raw).__name__,
+        )
         orders = []
 
     cancelled = 0

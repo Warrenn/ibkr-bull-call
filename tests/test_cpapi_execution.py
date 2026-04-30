@@ -449,6 +449,114 @@ def test_cancel_orphaned_combo_orders_handles_empty_response() -> None:
     ) == 0
 
 
+def test_cancel_orphaned_combo_orders_filter_aligns_with_working_statuses() -> None:
+    """Sourcery PR #10: ``_WORKING_STATUSES`` and the ``live_orders``
+    filters must agree so pending_submit / pending_cancel aren't silently
+    dropped server-side before our detection runs."""
+
+    from bull_call.cpapi import execution
+
+    captured_filters: list[Any] = []
+
+    class _Resp:
+        def __init__(self, data: Any) -> None:
+            self.data = data
+
+    class FakeClient:
+        def live_orders(self, *, filters: Any = None, force: bool = None,
+                        account_id: str = None) -> _Resp:
+            captured_filters.append(filters)
+            return _Resp({"orders": []})
+
+        def cancel_order(self, *, order_id: str, account_id: str) -> _Resp:
+            return _Resp({})
+
+    execution.cancel_orphaned_combo_orders(
+        FakeClient(), account_id="A1",  # type: ignore[arg-type]
+    )
+
+    assert captured_filters, "live_orders was not called"
+    requested = list(captured_filters[0])
+    # Every status we'd recognise as "working" must be expressible via the
+    # filter we send to IBKR, otherwise pending states get silently dropped
+    # server-side. Normalize both ends to absorb capitalization and
+    # underscoring differences.
+    requested_normalized = {execution._normalize_status(t) for t in requested}
+    assert execution._WORKING_STATUSES == requested_normalized
+
+
+def test_cancel_orphaned_combo_orders_cancels_pending_states_too() -> None:
+    """Pending states are working statuses too — the filter expansion must
+    actually result in those orders being detected and cancelled."""
+
+    from bull_call.cpapi import execution
+
+    cancelled: list[str] = []
+
+    class _Resp:
+        def __init__(self, data: Any) -> None:
+            self.data = data
+
+    class FakeClient:
+        def live_orders(self, *, filters: Any = None, force: bool = None,
+                        account_id: str = None) -> _Resp:
+            return _Resp({
+                "orders": [
+                    {"order_id": "P1", "secType": "BAG",
+                     "conidex": "28812380;;;1/1,2/-1", "status": "PendingSubmit"},
+                    {"order_id": "P2", "secType": "BAG",
+                     "conidex": "28812380;;;3/1,4/-1", "status": "pending_cancel"},
+                ],
+            })
+
+        def cancel_order(self, *, order_id: str, account_id: str) -> _Resp:
+            cancelled.append(order_id)
+            return _Resp({})
+
+    n = execution.cancel_orphaned_combo_orders(
+        FakeClient(), account_id="A1",  # type: ignore[arg-type]
+    )
+    assert sorted(cancelled) == ["P1", "P2"]
+    assert n == 2
+
+
+def test_cancel_orphaned_combo_orders_warns_on_unexpected_response_shape(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Sourcery PR #10: an unexpected response shape used to be silently
+    treated as empty — making it impossible to diagnose. Now we log a
+    WARNING so the deviation is visible in CloudWatch."""
+
+    import logging
+
+    from bull_call.cpapi import execution
+
+    class _Resp:
+        def __init__(self, data: Any) -> None:
+            self.data = data
+
+    class FakeClient:
+        def live_orders(self, *, filters: Any = None, force: bool = None,
+                        account_id: str = None) -> _Resp:
+            # An unexpected shape — not a list, not a dict with 'orders'.
+            return _Resp("totally unexpected string")
+
+        def cancel_order(self, *, order_id: str, account_id: str) -> _Resp:
+            return _Resp({})
+
+    caplog.set_level(logging.WARNING, logger="bull_call.cpapi.execution")
+    n = execution.cancel_orphaned_combo_orders(
+        FakeClient(), account_id="A1",  # type: ignore[arg-type]
+    )
+    assert n == 0
+    assert any(
+        "unexpected" in r.getMessage().lower()
+        or "unrecognised" in r.getMessage().lower()
+        or "shape" in r.getMessage().lower()
+        for r in caplog.records
+    ), "expected a WARNING about the unexpected live_orders response shape"
+
+
 def test_cancel_orphaned_combo_orders_swallows_per_order_cancel_failure(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
