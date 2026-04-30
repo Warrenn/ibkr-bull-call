@@ -1,0 +1,40 @@
+# Dependabot keeps third-party deps fresh so we don't accumulate stale
+# packages with known CVEs (especially the AWS / IBKR-adjacent stack:
+# boto3, botocore, ibind, ibind transitive HTTP libs).
+#
+# Updates run weekly, grouped by ecosystem. PRs come into ``main``
+# and run through the same CI gates (pytest, mypy, shellcheck,
+# cfn-lint, coverage floor) as any other PR — so a breaking dep bump
+# fails CI before it can be merged.
+
+version: 2
+
+updates:
+  # Python deps from pyproject.toml.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      # Bundle compatible patch/minor bumps so we don't get one PR per
+      # transitive dep — easier to review the deltas.
+      python-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
+      - "deps"
+      - "python"
+
+  # GitHub Actions used in .github/workflows/ci.yml.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    labels:
+      - "deps"
+      - "ci"
