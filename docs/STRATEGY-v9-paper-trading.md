@@ -141,7 +141,8 @@ CI gate: 85% coverage (existing project standard) + mypy + shellcheck on infra c
 
 - [x] Phase 1: signal + shadow (5 steps) — completed 2026-04-30 (PR #73 merged)
 - [x] Phase 2: state + rebalance plan (4 steps) — completed 2026-05-01
-- [ ] Phase 3: IBKR integration + dry-run + paper smoke (4 steps)
+- [x] Phase 3a: IBKR integration offline (contracts + stock execution) — completed 2026-05-01
+- [ ] Phase 3b: dry-run end-to-end smoke + live paper smoke (interactive, requires IBKR paper account)
 - [ ] Phase 4: scheduling + monitoring + halt (5 steps)
 - [ ] Phase 5: deploy + smoke + start pilot clock (4 steps)
 - [ ] Phase 6: operate 90 trading days (2 steps)
