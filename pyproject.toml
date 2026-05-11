@@ -12,7 +12,7 @@ dependencies = [
 
 [project.optional-dependencies]
 aws = [
-    "boto3>=1.43.0",
+    "boto3>=1.43.6",
 ]
 dev = [
     "pytest>=8.0",
@@ -24,7 +24,7 @@ dev = [
     "pyarrow>=16",        # research-grade Parquet I/O (research/scripts/...)
     "databento>=0.77.0",  # Databento client for research/scripts/download_databento.py
     "yfinance>=1.3.0",    # free daily VIX for v3 regime gate (research/scripts/download_vix.py)
-    "boto3>=1.43.0",
+    "boto3>=1.43.6",
     "botocore>=1.34",
     "moto[dynamodb]>=5.0",
     "pyyaml>=6.0",  # CFN-template parsing in tests/test_cfn_templates.py
